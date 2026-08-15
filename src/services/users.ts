@@ -73,6 +73,7 @@ export async function createUser(input: UserCreateInput) {
     passwordHash: await hashPassword(input.password),
     role: input.role,
     restaurantId: input.restaurantId ?? "",
+    permissions: input.permissions ?? [],
     isActive: input.isActive,
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp()
@@ -128,6 +129,7 @@ export function toAuthUser(user: AppUser): AuthUser {
     email: user.email,
     name: user.name,
     role: user.role,
-    restaurantId: user.restaurantId || undefined
+    restaurantId: user.restaurantId || undefined,
+    permissions: user.permissions ?? []
   };
 }

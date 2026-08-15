@@ -1,9 +1,48 @@
 export type MenuTemplate = "minimal" | "classic" | "premium" | "cafe" | "pinza";
 export type RestaurantPlan = "basic" | "standard" | "premium";
-export type UserRole = "superAdmin" | "restaurantOwner";
+export type StaffRole =
+  | "OWNER"
+  | "ADMIN"
+  | "MANAGER"
+  | "CASHIER"
+  | "WAITER"
+  | "KITCHEN"
+  | "ACCOUNTANT"
+  | "INVENTORY_MANAGER";
+export type UserRole = "superAdmin" | "restaurantOwner" | StaffRole;
 export type SubscriptionStatus = "pendingApproval" | "active" | "pastDue" | "suspended" | "cancelled";
 export type BillingCycle = "monthly" | "yearly";
 export type CustomDomainStatus = "none" | "pending" | "verified" | "rejected";
+export type RestaurantModule =
+  | "menu"
+  | "orders"
+  | "tables"
+  | "pos"
+  | "accounting"
+  | "inventory"
+  | "purchasing"
+  | "kitchen"
+  | "reports"
+  | "expenses"
+  | "payments"
+  | "staff";
+export type RestaurantModules = Record<RestaurantModule, boolean>;
+export type Permission =
+  | "orders.view"
+  | "orders.create"
+  | "orders.update"
+  | "orders.cancel"
+  | "pos.access"
+  | "payments.create"
+  | "expenses.create"
+  | "accounting.view"
+  | "accounting.manage"
+  | "inventory.view"
+  | "inventory.adjust"
+  | "purchasing.manage"
+  | "tables.manage"
+  | "reports.view"
+  | "staff.manage";
 
 export type Theme = {
   primaryColor: string;
@@ -38,6 +77,10 @@ export type Restaurant = {
   customDomain?: string;
   customDomainStatus?: CustomDomainStatus;
   customDomainVerifiedAt?: string;
+  modules?: Partial<RestaurantModules>;
+  timezone?: string;
+  taxRate?: number;
+  serviceChargeRate?: number;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -70,6 +113,7 @@ export type AuthUser = {
   name?: string;
   role: UserRole;
   restaurantId?: string;
+  permissions?: Permission[];
 };
 
 export type AppUser = {
@@ -79,6 +123,7 @@ export type AppUser = {
   passwordHash: string;
   role: UserRole;
   restaurantId?: string;
+  permissions?: Permission[];
   isActive: boolean;
   createdAt?: string;
   updatedAt?: string;
@@ -94,6 +139,16 @@ export type Payment = {
   notes: string;
   createdAt?: string;
 };
+
+export type TableStatus = "AVAILABLE" | "OCCUPIED" | "RESERVED" | "CLEANING" | "DISABLED";
+export type OrderStatus = "DRAFT" | "PENDING" | "CONFIRMED" | "PREPARING" | "READY" | "SERVED" | "COMPLETED" | "CANCELLED";
+export type OrderType = "DINE_IN" | "TAKEAWAY" | "DELIVERY" | "QR";
+export type PaymentMethod = "CASH" | "CARD" | "BANK_TRANSFER" | "WALLET" | "SPLIT" | "DEBT";
+export type InvoiceType = "SALE" | "PURCHASE" | "REFUND";
+export type InvoiceStatus = "UNPAID" | "PARTIAL" | "PAID" | "VOID";
+export type InventoryTransactionType = "IN" | "OUT" | "ADJUST" | "REVERSE";
+export type CashMovementType = "IN" | "OUT";
+export type JournalEntryStatus = "DRAFT" | "POSTED" | "REVERSED";
 
 declare global {
   namespace Express {

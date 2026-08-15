@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { requireOwner } from "../middleware/auth.js";
+import { restaurantOpsRouter } from "../modules/restaurant-ops/routes.js";
 import { createCategory, createItem, deleteCategory, deleteItem, getRestaurantById, listCategories, listItems, updateCategory, updateItem, updateRestaurant } from "../services/restaurants.js";
 import { planLimits } from "../services/plans.js";
 import { uploadImageToCloudinary } from "../services/uploads.js";
@@ -7,6 +8,7 @@ import { HttpError, sendJson } from "../utils/http.js";
 import { categoryCreateSchema, categoryPatchSchema, itemCreateSchema, itemPatchSchema, ownerRestaurantPatchSchema, ownerThemePatchSchema, uploadImageSchema } from "../validators.js";
 export const ownerRouter = Router();
 ownerRouter.use(requireOwner);
+ownerRouter.use("/ops", restaurantOpsRouter);
 ownerRouter.get("/restaurant", async (req, res, next) => {
     try {
         sendJson(res, await getOwnerRestaurantId(req));

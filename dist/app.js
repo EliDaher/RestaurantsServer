@@ -17,6 +17,11 @@ export function createApp() {
     app.get("/health", (_req, res) => {
         res.json({ ok: true });
     });
+    app.get("/", (req, res) => {
+        res.json({
+            message: "Welcome to the API",
+        });
+    });
     app.use("/api", publicRouter);
     app.use("/api/auth", authRouter);
     app.use("/api/owner", ownerRouter);

@@ -32,6 +32,47 @@ export const planLimits = {
         allowCustomDomain: true
     }
 };
+export const defaultModules = {
+    menu: true,
+    orders: false,
+    tables: false,
+    pos: false,
+    accounting: false,
+    inventory: false,
+    purchasing: false,
+    kitchen: false,
+    reports: false,
+    expenses: false,
+    payments: false,
+    staff: false
+};
+export const planModules = {
+    basic: {
+        menu: true
+    },
+    standard: {
+        menu: true,
+        orders: true,
+        tables: true,
+        pos: true,
+        payments: true,
+        reports: true
+    },
+    premium: {
+        menu: true,
+        orders: true,
+        tables: true,
+        pos: true,
+        accounting: true,
+        inventory: true,
+        purchasing: true,
+        kitchen: true,
+        reports: true,
+        expenses: true,
+        payments: true,
+        staff: true
+    }
+};
 export function normalizeTemplateForPlan(plan, template) {
     if (template && planTemplates[plan].includes(template)) {
         return template;
@@ -43,8 +84,25 @@ export function normalizeRestaurantPlan(input) {
     return {
         ...input,
         plan,
-        template: normalizeTemplateForPlan(plan, input.template)
+        template: normalizeTemplateForPlan(plan, input.template),
+        modules: normalizeModules(plan, input.modules)
     };
+}
+export function normalizeModules(plan, modules) {
+    return {
+        ...defaultModules,
+        ...planModules[plan],
+        ...modules
+    };
+}
+export function hasFeature(restaurant, feature) {
+    const plan = restaurant.plan ?? "basic";
+    return normalizeModules(plan, restaurant.modules)[feature];
+}
+export function assertFeature(restaurant, feature) {
+    if (!hasFeature(restaurant, feature)) {
+        throw new HttpError(403, `The ${feature} module is not enabled for this restaurant`);
+    }
 }
 export function assertTemplateAllowed(plan, template) {
     if (template && !planTemplates[plan].includes(template)) {

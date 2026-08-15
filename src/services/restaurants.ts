@@ -8,6 +8,7 @@ import {
   assertItemLimit,
   assertTemplateAllowed,
   enforceItemPlanRules,
+  normalizeModules,
   normalizeRestaurantPlan,
   normalizeTemplateForPlan
 } from "./plans.js";
@@ -93,6 +94,7 @@ export async function updateRestaurant(restaurantId: string, input: Partial<Rest
     ...input,
     plan: nextPlan,
     template: normalizeTemplateForPlan(nextPlan, input.template ?? current.template),
+    modules: input.modules ? normalizeModules(nextPlan, input.modules) : current.modules,
     updatedAt: FieldValue.serverTimestamp()
   });
 
@@ -108,6 +110,7 @@ export async function updateRestaurantPlan(restaurantId: string, plan: Restauran
   await restaurants.doc(restaurantId).update({
     plan,
     template: normalizeTemplateForPlan(plan, template ?? current.template),
+    modules: normalizeModules(plan, current.modules),
     updatedAt: FieldValue.serverTimestamp()
   });
 }
@@ -128,6 +131,7 @@ export async function updateRestaurantSubscription(
   await restaurants.doc(restaurantId).update({
     plan: nextPlan,
     template: normalizeTemplateForPlan(nextPlan, current.template),
+    modules: normalizeModules(nextPlan, current.modules),
     isActive: input.status === "active",
     subscriptionStatus: input.status,
     billingCycle: input.billingCycle ?? current.billingCycle ?? "monthly",

@@ -1,7 +1,7 @@
 import { db, FieldValue } from "../config/firebase.js";
 import { withId } from "../utils/firestore.js";
 import { HttpError } from "../utils/http.js";
-import { assertCategoryLimit, assertCustomDomainAllowed, assertItemLimit, assertTemplateAllowed, enforceItemPlanRules, normalizeRestaurantPlan, normalizeTemplateForPlan } from "./plans.js";
+import { assertCategoryLimit, assertCustomDomainAllowed, assertItemLimit, assertTemplateAllowed, enforceItemPlanRules, normalizeModules, normalizeRestaurantPlan, normalizeTemplateForPlan } from "./plans.js";
 const restaurants = db.collection("restaurants");
 const payments = db.collection("payments");
 export async function findRestaurantBySlug(slug, activeOnly = false) {
@@ -70,6 +70,7 @@ export async function updateRestaurant(restaurantId, input) {
         ...input,
         plan: nextPlan,
         template: normalizeTemplateForPlan(nextPlan, input.template ?? current.template),
+        modules: input.modules ? normalizeModules(nextPlan, input.modules) : current.modules,
         updatedAt: FieldValue.serverTimestamp()
     });
     if (input.customDomain !== undefined) {
@@ -82,6 +83,7 @@ export async function updateRestaurantPlan(restaurantId, plan, template) {
     await restaurants.doc(restaurantId).update({
         plan,
         template: normalizeTemplateForPlan(plan, template ?? current.template),
+        modules: normalizeModules(plan, current.modules),
         updatedAt: FieldValue.serverTimestamp()
     });
 }
@@ -91,6 +93,7 @@ export async function updateRestaurantSubscription(restaurantId, input) {
     await restaurants.doc(restaurantId).update({
         plan: nextPlan,
         template: normalizeTemplateForPlan(nextPlan, current.template),
+        modules: normalizeModules(nextPlan, current.modules),
         isActive: input.status === "active",
         subscriptionStatus: input.status,
         billingCycle: input.billingCycle ?? current.billingCycle ?? "monthly",

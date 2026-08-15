@@ -1,4 +1,4 @@
-import type { MenuItem, MenuTemplate, Restaurant, RestaurantPlan } from "../types.js";
+import type { MenuItem, MenuTemplate, Restaurant, RestaurantModule, RestaurantModules, RestaurantPlan } from "../types.js";
 import { HttpError } from "../utils/http.js";
 
 export const planTemplates: Record<RestaurantPlan, MenuTemplate[]> = {
@@ -46,6 +46,49 @@ export const planLimits: Record<
   }
 };
 
+export const defaultModules: RestaurantModules = {
+  menu: true,
+  orders: false,
+  tables: false,
+  pos: false,
+  accounting: false,
+  inventory: false,
+  purchasing: false,
+  kitchen: false,
+  reports: false,
+  expenses: false,
+  payments: false,
+  staff: false
+};
+
+export const planModules: Record<RestaurantPlan, Partial<RestaurantModules>> = {
+  basic: {
+    menu: true
+  },
+  standard: {
+    menu: true,
+    orders: true,
+    tables: true,
+    pos: true,
+    payments: true,
+    reports: true
+  },
+  premium: {
+    menu: true,
+    orders: true,
+    tables: true,
+    pos: true,
+    accounting: true,
+    inventory: true,
+    purchasing: true,
+    kitchen: true,
+    reports: true,
+    expenses: true,
+    payments: true,
+    staff: true
+  }
+};
+
 export function normalizeTemplateForPlan(plan: RestaurantPlan, template?: MenuTemplate) {
   if (template && planTemplates[plan].includes(template)) {
     return template;
@@ -59,8 +102,28 @@ export function normalizeRestaurantPlan(input: Partial<Restaurant>) {
   return {
     ...input,
     plan,
-    template: normalizeTemplateForPlan(plan, input.template)
+    template: normalizeTemplateForPlan(plan, input.template),
+    modules: normalizeModules(plan, input.modules)
   };
+}
+
+export function normalizeModules(plan: RestaurantPlan, modules?: Partial<RestaurantModules>) {
+  return {
+    ...defaultModules,
+    ...planModules[plan],
+    ...modules
+  };
+}
+
+export function hasFeature(restaurant: Pick<Restaurant, "plan" | "modules">, feature: RestaurantModule) {
+  const plan = restaurant.plan ?? "basic";
+  return normalizeModules(plan, restaurant.modules)[feature];
+}
+
+export function assertFeature(restaurant: Pick<Restaurant, "plan" | "modules">, feature: RestaurantModule) {
+  if (!hasFeature(restaurant, feature)) {
+    throw new HttpError(403, `The ${feature} module is not enabled for this restaurant`);
+  }
 }
 
 export function assertTemplateAllowed(plan: RestaurantPlan, template?: MenuTemplate) {

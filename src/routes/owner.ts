@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Request } from "express";
 import { requireOwner } from "../middleware/auth.js";
+import { restaurantOpsRouter } from "../modules/restaurant-ops/routes.js";
 import {
   createCategory,
   createItem,
@@ -29,6 +30,7 @@ import {
 export const ownerRouter = Router();
 
 ownerRouter.use(requireOwner);
+ownerRouter.use("/ops", restaurantOpsRouter);
 
 ownerRouter.get("/restaurant", async (req, res, next) => {
   try {

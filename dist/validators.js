@@ -1,10 +1,54 @@
 import { z } from "zod";
 const templateSchema = z.enum(["minimal", "classic", "premium", "cafe", "pinza"]).default("classic");
 const planSchema = z.enum(["basic", "standard", "premium"]).default("basic");
-const roleSchema = z.enum(["superAdmin", "restaurantOwner"]);
+const roleSchema = z.enum([
+    "superAdmin",
+    "restaurantOwner",
+    "OWNER",
+    "ADMIN",
+    "MANAGER",
+    "CASHIER",
+    "WAITER",
+    "KITCHEN",
+    "ACCOUNTANT",
+    "INVENTORY_MANAGER"
+]);
 const subscriptionStatusSchema = z.enum(["pendingApproval", "active", "pastDue", "suspended", "cancelled"]);
 const billingCycleSchema = z.enum(["monthly", "yearly"]).default("monthly");
 const customDomainStatusSchema = z.enum(["none", "pending", "verified", "rejected"]).default("none");
+const permissionSchema = z.enum([
+    "orders.view",
+    "orders.create",
+    "orders.update",
+    "orders.cancel",
+    "pos.access",
+    "payments.create",
+    "expenses.create",
+    "accounting.view",
+    "accounting.manage",
+    "inventory.view",
+    "inventory.adjust",
+    "purchasing.manage",
+    "tables.manage",
+    "reports.view",
+    "staff.manage"
+]);
+const modulesSchema = z
+    .object({
+    menu: z.boolean().optional(),
+    orders: z.boolean().optional(),
+    tables: z.boolean().optional(),
+    pos: z.boolean().optional(),
+    accounting: z.boolean().optional(),
+    inventory: z.boolean().optional(),
+    purchasing: z.boolean().optional(),
+    kitchen: z.boolean().optional(),
+    reports: z.boolean().optional(),
+    expenses: z.boolean().optional(),
+    payments: z.boolean().optional(),
+    staff: z.boolean().optional()
+})
+    .default({});
 const themeSchema = z
     .object({
     primaryColor: z.string().default("#b45309"),
@@ -41,7 +85,11 @@ export const restaurantCreateSchema = z.object({
     subscriptionNotes: z.string().trim().optional(),
     customDomain: z.string().trim().optional(),
     customDomainStatus: customDomainStatusSchema.optional(),
-    customDomainVerifiedAt: z.string().trim().optional()
+    customDomainVerifiedAt: z.string().trim().optional(),
+    modules: modulesSchema.optional(),
+    timezone: z.string().trim().default("Asia/Damascus"),
+    taxRate: z.coerce.number().min(0).default(0),
+    serviceChargeRate: z.coerce.number().min(0).default(0)
 });
 export const restaurantPatchSchema = restaurantCreateSchema.partial();
 export const restaurantPlanPatchSchema = z.object({
@@ -49,7 +97,7 @@ export const restaurantPlanPatchSchema = z.object({
     template: templateSchema.optional()
 });
 export const ownerRestaurantPatchSchema = restaurantCreateSchema
-    .omit({ plan: true, ownerUserId: true })
+    .omit({ plan: true, ownerUserId: true, modules: true })
     .partial();
 export const ownerThemePatchSchema = z.object({
     template: templateSchema.optional(),
@@ -81,6 +129,7 @@ export const userCreateSchema = z.object({
     password: z.string().min(6),
     role: roleSchema,
     restaurantId: z.string().trim().optional(),
+    permissions: z.array(permissionSchema).optional(),
     isActive: z.boolean().default(true)
 });
 export const userPatchSchema = z
@@ -90,6 +139,7 @@ export const userPatchSchema = z
     password: z.string().min(6).optional(),
     role: roleSchema.optional(),
     restaurantId: z.string().trim().optional(),
+    permissions: z.array(permissionSchema).optional(),
     isActive: z.boolean().optional()
 })
     .refine((value) => Object.keys(value).length > 0, {
