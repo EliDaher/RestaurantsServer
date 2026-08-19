@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { db, FieldValue } from "../../config/firebase.js";
 import { HttpError } from "../../utils/http.js";
 import { withId } from "../../utils/firestore.js";
-export function listTables(restaurantId) {
-    return listScoped(restaurantId, "tables");
+export async function listTables(restaurantId) {
+    const tables = await listScoped(restaurantId, "tables");
+    return tables.filter((table) => !table.deletedAt);
 }
 export function getTable(restaurantId, tableId) {
     return getScoped(restaurantId, "tables", tableId);
@@ -134,12 +135,15 @@ export function listOrders(restaurantId) {
 export function getOrder(restaurantId, orderId) {
     return getScoped(restaurantId, "orders", orderId);
 }
-export async function createOrder(restaurantId, input, createdById, restaurant) {
+export async function createOrder(restaurantId, input, createdById, restaurant, options = {}) {
     const items = await hydrateOrderItems(restaurantId, input.items);
     const totals = calculateOrderTotals(items, input.discount, input.tax, input.serviceCharge);
     const orderedAt = input.orderedAt || new Date().toISOString();
-    const ref = scopedCollection(restaurantId, "orders").doc();
+    const ref = options.orderId ? scopedCollection(restaurantId, "orders").doc(options.orderId) : scopedCollection(restaurantId, "orders").doc();
     await db.runTransaction(async (transaction) => {
+        const existingOrder = await transaction.get(ref);
+        if (existingOrder.exists)
+            return;
         let tableName = "";
         if (input.tableId) {
             const tableRef = scopedDoc(restaurantId, "tables", input.tableId);
@@ -147,7 +151,14 @@ export async function createOrder(restaurantId, input, createdById, restaurant) 
             if (!table.exists) {
                 throw new HttpError(404, "Table not found");
             }
-            tableName = String(table.data().name ?? "");
+            const tableData = table.data();
+            if (tableData.status === "DISABLED") {
+                throw new HttpError(400, "Cannot start an order on a disabled table");
+            }
+            if (tableData.currentOrderId && tableData.currentOrderId !== ref.id) {
+                throw new HttpError(409, "Table already has an open order", { code: "table_occupied" });
+            }
+            tableName = String(tableData.name ?? "");
             transaction.update(tableRef, {
                 status: "OCCUPIED",
                 currentOrderId: ref.id,
@@ -202,11 +213,17 @@ export async function updateOrder(restaurantId, orderId, input) {
             throw new HttpError(404, "Order not found");
         }
         const order = { id: snapshot.id, ...snapshot.data() };
-        if (["COMPLETED", "CANCELLED"].includes(order.status) && input.status && input.status !== order.status) {
+        const orderIsClosed = ["COMPLETED", "CANCELLED"].includes(order.status);
+        const orderHasFinancialLink = Boolean(order.invoiceId || order.paymentId);
+        const tableIsChanging = input.tableId !== undefined && input.tableId !== order.tableId;
+        if (orderIsClosed && input.status && input.status !== order.status) {
             throw new HttpError(400, "Closed orders cannot be reopened through status updates");
         }
-        if (hasFinancialChanges && (["COMPLETED", "CANCELLED"].includes(order.status) || order.invoiceId || order.paymentId)) {
+        if (hasFinancialChanges && (orderIsClosed || orderHasFinancialLink)) {
             throw new HttpError(400, "Completed or financially linked orders cannot be edited");
+        }
+        if (tableIsChanging && (orderIsClosed || orderHasFinancialLink)) {
+            throw new HttpError(400, "Completed or financially linked orders cannot be moved");
         }
         const nextItems = items ?? order.items;
         const discount = input.discount ?? numberValue(order.discount);
@@ -214,7 +231,7 @@ export async function updateOrder(restaurantId, orderId, input) {
         const serviceCharge = input.serviceCharge ?? numberValue(order.serviceCharge);
         const totals = hasFinancialChanges ? calculateOrderTotals(nextItems, discount, tax, serviceCharge) : {};
         const nextTableId = input.tableId ?? order.tableId ?? "";
-        if (input.tableId !== undefined && input.tableId !== order.tableId) {
+        if (tableIsChanging) {
             const previousTableRef = order.tableId ? scopedDoc(restaurantId, "tables", order.tableId) : null;
             const nextTableRef = nextTableId ? scopedDoc(restaurantId, "tables", nextTableId) : null;
             const [previousTable, nextTable] = await Promise.all([
@@ -223,6 +240,15 @@ export async function updateOrder(restaurantId, orderId, input) {
             ]);
             if (nextTableRef && !nextTable?.exists) {
                 throw new HttpError(404, "Table not found");
+            }
+            if (nextTable?.exists) {
+                const targetTable = nextTable.data();
+                if (targetTable.status === "DISABLED") {
+                    throw new HttpError(400, "Cannot move an order to a disabled table");
+                }
+                if (targetTable.currentOrderId && targetTable.currentOrderId !== orderId) {
+                    throw new HttpError(409, "Target table already has an open order", { code: "table_occupied" });
+                }
             }
             if (previousTableRef && previousTable?.exists && previousTable.data().currentOrderId === orderId) {
                 transaction.update(previousTableRef, {
@@ -383,7 +409,7 @@ export async function completeOrder(restaurantId, orderId, input, createdById) {
         const cashRegisterRef = input.cashRegisterId && paidAmount > 0 ? scopedDoc(restaurantId, "cashRegisters", input.cashRegisterId) : null;
         const cashRegisterSnapshot = cashRegisterRef ? await transaction.get(cashRegisterRef) : null;
         if (cashRegisterRef && !cashRegisterSnapshot?.exists) {
-            throw new HttpError(404, "Cash register not found");
+            throw new HttpError(404, "Cash register not found", { code: "cash_register_missing" });
         }
         await deductRecipeInventory(transaction, restaurantId, order, createdById);
         transaction.set(invoiceRef, {

@@ -63,6 +63,11 @@ export type Restaurant = {
   phone: string;
   address: string;
   currency: string;
+  receiptRestaurantName?: string;
+  vatNumber?: string;
+  receiptLocation?: string;
+  receiptPrinterIp?: string;
+  receiptPrinterPort?: number;
   isActive: boolean;
   plan: RestaurantPlan;
   template: MenuTemplate;

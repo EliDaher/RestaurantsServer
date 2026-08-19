@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Request } from "express";
 import { requireOwner } from "../middleware/auth.js";
 import { restaurantOpsRouter } from "../modules/restaurant-ops/routes.js";
+import { syncRouter } from "../modules/sync/routes.js";
 import {
   createCategory,
   createItem,
@@ -15,6 +16,7 @@ import {
   updateRestaurant
 } from "../services/restaurants.js";
 import { planLimits } from "../services/plans.js";
+import { sendReceiptCutCommand } from "../services/receipt-printer.js";
 import { uploadImageToCloudinary } from "../services/uploads.js";
 import { HttpError, sendJson } from "../utils/http.js";
 import {
@@ -31,6 +33,7 @@ export const ownerRouter = Router();
 
 ownerRouter.use(requireOwner);
 ownerRouter.use("/ops", restaurantOpsRouter);
+ownerRouter.use("/sync", syncRouter);
 
 ownerRouter.get("/restaurant", async (req, res, next) => {
   try {
@@ -56,6 +59,19 @@ ownerRouter.patch("/restaurant/theme", async (req, res, next) => {
     const restaurantId = getRequiredRestaurantId(req);
     const input = ownerThemePatchSchema.parse(req.body);
     await updateRestaurant(restaurantId, input);
+    sendJson(res, { ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+ownerRouter.post("/receipt-printer/cut", async (req, res, next) => {
+  try {
+    const restaurant = await getRestaurantById(getRequiredRestaurantId(req));
+    await sendReceiptCutCommand({
+      host: restaurant.receiptPrinterIp,
+      port: restaurant.receiptPrinterPort
+    });
     sendJson(res, { ok: true });
   } catch (error) {
     next(error);
