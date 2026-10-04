@@ -259,6 +259,7 @@ export async function createOrder(restaurantId: string, input: OrderInput, creat
   const totals = calculateOrderTotals(items, input.discount, input.tax, input.serviceCharge);
   const orderedAt = input.orderedAt || new Date().toISOString();
   const ref = options.orderId ? scopedCollection(restaurantId, "orders").doc(options.orderId) : scopedCollection(restaurantId, "orders").doc();
+  const version = Date.now();
 
   await db.runTransaction(async (transaction) => {
     const existingOrder = await transaction.get(ref);
@@ -308,6 +309,7 @@ export async function createOrder(restaurantId: string, input: OrderInput, creat
       completedAt: "",
       cancelledAt: "",
       currency: restaurant.currency,
+      version,
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp()
     });
@@ -341,6 +343,7 @@ export async function updateOrder(restaurantId: string, orderId: string, input: 
     }
 
     const order = { id: snapshot.id, ...snapshot.data() } as Order;
+    const nextVersion = nextOrderVersion(order);
     const orderIsClosed = ["COMPLETED", "CANCELLED"].includes(order.status);
     const orderHasFinancialLink = Boolean(order.invoiceId || order.paymentId);
     const tableIsChanging = input.tableId !== undefined && input.tableId !== order.tableId;
@@ -405,6 +408,7 @@ export async function updateOrder(restaurantId: string, orderId: string, input: 
       ...(items ? { items } : {}),
       ...totals,
       restaurantId,
+      version: nextVersion,
       updatedAt: FieldValue.serverTimestamp()
     });
   });
@@ -424,6 +428,7 @@ export async function cancelOrder(restaurantId: string, orderId: string, created
     }
 
     const order = { id: orderSnapshot.id, ...orderSnapshot.data() } as Order;
+    const nextVersion = nextOrderVersion(order);
     if (order.status === "CANCELLED") return;
 
     const invoiceRef = order.invoiceId ? scopedDoc(restaurantId, "invoices", order.invoiceId) : null;
@@ -510,6 +515,7 @@ export async function cancelOrder(restaurantId: string, orderId: string, created
       status: "CANCELLED",
       cancelledAt: new Date().toISOString(),
       notes: appendNote(order.notes, `Cancelled: ${reason}`),
+      version: nextVersion,
       updatedAt: FieldValue.serverTimestamp()
     });
 
@@ -539,6 +545,7 @@ export async function completeOrder(restaurantId: string, orderId: string, input
     }
 
     const order = { id: orderSnapshot.id, ...orderSnapshot.data() } as Order;
+    const nextVersion = nextOrderVersion(order);
     if (order.status === "CANCELLED") {
       throw new HttpError(400, "Cancelled orders cannot be completed");
     }
@@ -649,6 +656,7 @@ export async function completeOrder(restaurantId: string, orderId: string, input
       inventoryDeductedAt: new Date().toISOString(),
       completedAt: new Date().toISOString(),
       closedById: createdById,
+      version: nextVersion,
       updatedAt: FieldValue.serverTimestamp()
     });
 
@@ -1136,6 +1144,28 @@ function scopedDoc(restaurantId: string, collectionName: CollectionName, id: str
 function numberValue(value: unknown, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function currentOrderVersion(order: { version?: unknown; updatedAt?: unknown; createdAt?: unknown }) {
+  const explicitVersion = Number(order.version);
+  if (Number.isFinite(explicitVersion) && explicitVersion > 0) return explicitVersion;
+
+  return timestampVersion(order.updatedAt) || timestampVersion(order.createdAt) || 0;
+}
+
+function nextOrderVersion(order: { version?: unknown; updatedAt?: unknown; createdAt?: unknown }) {
+  const currentVersion = currentOrderVersion(order);
+  return Math.max(Date.now(), currentVersion + 1);
+}
+
+function timestampVersion(value: unknown) {
+  if (!value) return 0;
+  if (typeof value === "object" && "toMillis" in value && typeof value.toMillis === "function") {
+    const millis = value.toMillis();
+    return Number.isFinite(millis) ? millis : 0;
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function isWithinDateRange(value: string | undefined, from: string, to: string) {

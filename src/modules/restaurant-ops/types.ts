@@ -59,6 +59,7 @@ export type Order = {
   inventoryDeductedAt: string;
   completedAt: string;
   cancelledAt: string;
+  version?: number;
   createdAt?: string;
   updatedAt?: string;
 };

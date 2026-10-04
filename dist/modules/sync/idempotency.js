@@ -1,16 +1,11 @@
-import { createHash } from "node:crypto";
 import { db } from "../../config/firebase.js";
 import { HttpError } from "../../utils/http.js";
+import { operationPayloadHash } from "./operation-fingerprint.js";
 export function operationRef(restaurantId, operationId) {
     return db.collection("restaurants").doc(restaurantId).collection("syncOperations").doc(operationId);
 }
 export function payloadHash(operation) {
-    return createHash("sha256").update(stableStringify({
-        entityType: operation.entityType,
-        entityId: operation.entityId,
-        action: operation.action,
-        payload: operation.payload
-    })).digest("hex");
+    return operationPayloadHash(operation);
 }
 export function duplicateResult(operation, record) {
     return {
@@ -29,14 +24,4 @@ export function assertSamePayload(operation, existingHash) {
             code: "operation_reuse"
         });
     }
-}
-function stableStringify(value) {
-    if (Array.isArray(value)) {
-        return `[${value.map(stableStringify).join(",")}]`;
-    }
-    if (value && typeof value === "object") {
-        const entries = Object.entries(value).sort(([first], [second]) => first.localeCompare(second));
-        return `{${entries.map(([key, nested]) => `${JSON.stringify(key)}:${stableStringify(nested)}`).join(",")}}`;
-    }
-    return JSON.stringify(value);
 }
