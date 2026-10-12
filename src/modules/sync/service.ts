@@ -24,6 +24,7 @@ import { assertSamePayload, duplicateResult, operationRef, payloadHash } from ".
 import { currentOrderVersion, nextOrderVersion, orderVersionConflict } from "./order-versioning.js";
 import { assertSameOperationRecord } from "./operation-record.js";
 import type { SyncEntityType, SyncPushOperation, SyncPushResult } from "./types.js";
+import { prepareTableNameReservation } from "../restaurant-ops/table-uniqueness.js";
 import { tableSyncPayloadSchema } from "./validators.js";
 
 export function pullChanges(restaurantId: string, cursor: number) {
@@ -970,6 +971,7 @@ async function applyTableOperation(restaurantId: string, user: AuthUser, deviceI
 
     const nextVersion = Date.now();
     if (operation.action === "delete") {
+      const writeReservation = await prepareTableNameReservation(transaction, tableRef.parent.parent!, operation.entityId, current);
       const result = await persistOperationResult(transaction, restaurantId, opRef, operation, hash, deviceId, user, {
         operationId: operation.operationId,
         status: "applied",
@@ -979,6 +981,7 @@ async function applyTableOperation(restaurantId: string, user: AuthUser, deviceI
         response: { ok: true }
       }, "delete", nextVersion);
 
+      writeReservation(transaction);
       transaction.set(tableRef, {
         restaurantId,
         deletedAt: new Date().toISOString(),
@@ -990,6 +993,7 @@ async function applyTableOperation(restaurantId: string, user: AuthUser, deviceI
     }
 
     const payload = tableSyncPayloadSchema.parse(operation.payload);
+    const writeReservation = await prepareTableNameReservation(transaction, tableRef.parent.parent!, operation.entityId, current, payload.name);
     const tableData = {
       ...payload,
       restaurantId,
@@ -1014,6 +1018,7 @@ async function applyTableOperation(restaurantId: string, user: AuthUser, deviceI
       updatedAt: new Date().toISOString(),
       createdAt: current?.createdAt ?? new Date().toISOString()
     });
+    writeReservation(transaction);
     transaction.set(tableRef, tableData, { merge: true });
 
     return result;

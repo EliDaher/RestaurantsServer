@@ -7,6 +7,7 @@ import { listChanges, recordChange, recordChanges } from "./change-log.js";
 import { assertSamePayload, duplicateResult, operationRef, payloadHash } from "./idempotency.js";
 import { currentOrderVersion, nextOrderVersion, orderVersionConflict } from "./order-versioning.js";
 import { assertSameOperationRecord } from "./operation-record.js";
+import { prepareTableNameReservation } from "../restaurant-ops/table-uniqueness.js";
 import { tableSyncPayloadSchema } from "./validators.js";
 export function pullChanges(restaurantId, cursor) {
     return listChanges(restaurantId, cursor);
@@ -838,6 +839,7 @@ async function applyTableOperation(restaurantId, user, deviceId, operation) {
         }
         const nextVersion = Date.now();
         if (operation.action === "delete") {
+            const writeReservation = await prepareTableNameReservation(transaction, tableRef.parent.parent, operation.entityId, current);
             const result = await persistOperationResult(transaction, restaurantId, opRef, operation, hash, deviceId, user, {
                 operationId: operation.operationId,
                 status: "applied",
@@ -846,6 +848,7 @@ async function applyTableOperation(restaurantId, user, deviceId, operation) {
                 serverVersion: nextVersion,
                 response: { ok: true }
             }, "delete", nextVersion);
+            writeReservation(transaction);
             transaction.set(tableRef, {
                 restaurantId,
                 deletedAt: new Date().toISOString(),
@@ -855,6 +858,7 @@ async function applyTableOperation(restaurantId, user, deviceId, operation) {
             return result;
         }
         const payload = tableSyncPayloadSchema.parse(operation.payload);
+        const writeReservation = await prepareTableNameReservation(transaction, tableRef.parent.parent, operation.entityId, current, payload.name);
         const tableData = {
             ...payload,
             restaurantId,
@@ -879,6 +883,7 @@ async function applyTableOperation(restaurantId, user, deviceId, operation) {
             updatedAt: new Date().toISOString(),
             createdAt: current?.createdAt ?? new Date().toISOString()
         });
+        writeReservation(transaction);
         transaction.set(tableRef, tableData, { merge: true });
         return result;
     });

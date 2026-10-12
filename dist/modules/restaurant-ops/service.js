@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { db, FieldValue } from "../../config/firebase.js";
 import { HttpError } from "../../utils/http.js";
 import { withId } from "../../utils/firestore.js";
+import { createTableWithUniqueName, updateTableWithUniqueName, deleteTableWithUniqueName } from "./table-uniqueness.js";
 export async function listTables(restaurantId) {
     const tables = await listScoped(restaurantId, "tables");
     return tables.filter((table) => !table.deletedAt);
@@ -10,13 +11,13 @@ export function getTable(restaurantId, tableId) {
     return getScoped(restaurantId, "tables", tableId);
 }
 export function createTable(restaurantId, input) {
-    return createScoped(restaurantId, "tables", input);
+    return createTableWithUniqueName(db, restaurantId, input, FieldValue.serverTimestamp());
 }
 export function updateTable(restaurantId, tableId, input) {
-    return updateScoped(restaurantId, "tables", tableId, input);
+    return updateTableWithUniqueName(db, restaurantId, tableId, input, FieldValue.serverTimestamp());
 }
 export function deleteTable(restaurantId, tableId) {
-    return deleteScoped(restaurantId, "tables", tableId);
+    return deleteTableWithUniqueName(db, restaurantId, tableId);
 }
 export function listInventoryItems(restaurantId) {
     return listScoped(restaurantId, "inventoryItems");

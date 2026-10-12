@@ -4,6 +4,7 @@ import { db, FieldValue } from "../../config/firebase.js";
 import type { MenuItem, Restaurant } from "../../types.js";
 import { HttpError } from "../../utils/http.js";
 import { withId } from "../../utils/firestore.js";
+import { createTableWithUniqueName, updateTableWithUniqueName, deleteTableWithUniqueName } from "./table-uniqueness.js";
 import type {
   Account,
   CashMovement,
@@ -96,15 +97,15 @@ export function getTable(restaurantId: string, tableId: string) {
 }
 
 export function createTable(restaurantId: string, input: Omit<Table, "id" | "restaurantId" | "createdAt" | "updatedAt">) {
-  return createScoped(restaurantId, "tables", input);
+  return createTableWithUniqueName(db, restaurantId, input, FieldValue.serverTimestamp());
 }
 
 export function updateTable(restaurantId: string, tableId: string, input: Partial<Table>) {
-  return updateScoped(restaurantId, "tables", tableId, input);
+  return updateTableWithUniqueName(db, restaurantId, tableId, input, FieldValue.serverTimestamp());
 }
 
 export function deleteTable(restaurantId: string, tableId: string) {
-  return deleteScoped(restaurantId, "tables", tableId);
+  return deleteTableWithUniqueName(db, restaurantId, tableId);
 }
 
 export function listInventoryItems(restaurantId: string) {
