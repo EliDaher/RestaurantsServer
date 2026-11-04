@@ -1,9 +1,12 @@
+import { PaymentValidationError } from "../utils/payments.js";
 import { ZodError } from "zod";
 import { HttpError } from "../utils/http.js";
 export function notFound(req, _res, next) {
     next(new HttpError(404, `Route not found: ${req.method} ${req.path}`));
 }
 export function errorHandler(error, _req, res, _next) {
+    if (error instanceof PaymentValidationError)
+        return res.status(400).json({ error: { message: error.message, details: { code: "validation_error" } } });
     if (error instanceof ZodError) {
         return res.status(400).json({
             error: {

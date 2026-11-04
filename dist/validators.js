@@ -77,6 +77,7 @@ export const restaurantCreateSchema = z.object({
     receiptPrinterIp: z.string().trim().default(""),
     receiptPrinterPort: z.coerce.number().int().min(1).max(65535).default(9100),
     currency: z.string().trim().default("SYP"),
+    usdExchangeRate: z.coerce.number().finite().positive().optional(),
     isActive: z.boolean().default(true),
     plan: planSchema,
     template: templateSchema,
@@ -93,6 +94,7 @@ export const restaurantCreateSchema = z.object({
     customDomainVerifiedAt: z.string().trim().optional(),
     modules: modulesSchema.optional(),
     timezone: z.string().trim().default("Asia/Damascus"),
+    businessDayStartTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, "أدخل وقتاً صحيحاً بصيغة HH:mm").default("04:00"),
     taxRate: z.coerce.number().min(0).default(0),
     serviceChargeRate: z.coerce.number().min(0).default(0)
 });

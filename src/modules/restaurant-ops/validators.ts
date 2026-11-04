@@ -3,7 +3,7 @@ import { z } from "zod";
 const tableStatusSchema = z.enum(["AVAILABLE", "OCCUPIED", "RESERVED", "CLEANING", "DISABLED"]);
 const orderTypeSchema = z.enum(["DINE_IN", "TAKEAWAY", "DELIVERY", "QR"]);
 const orderStatusSchema = z.enum(["DRAFT", "PENDING", "CONFIRMED", "PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED"]);
-const paymentMethodSchema = z.enum(["CASH", "CARD", "BANK_TRANSFER", "WALLET", "SPLIT", "DEBT"]);
+const paymentMethodSchema = z.enum(["CASH", "SHAM_CASH", "CARD", "BANK_TRANSFER", "WALLET", "SPLIT", "DEBT"]);
 const invoiceTypeSchema = z.enum(["SALE", "PURCHASE", "REFUND"]);
 const invoiceStatusSchema = z.enum(["UNPAID", "PARTIAL", "PAID", "VOID"]);
 const inventoryTransactionTypeSchema = z.enum(["IN", "OUT", "ADJUST", "REVERSE"]);
@@ -11,6 +11,11 @@ const cashMovementTypeSchema = z.enum(["IN", "OUT"]);
 const accountTypeSchema = z.enum(["ASSET", "LIABILITY", "EQUITY", "REVENUE", "EXPENSE"]);
 const journalStatusSchema = z.enum(["DRAFT", "POSTED", "REVERSED"]);
 
+const moneyFields = {
+  currency: z.enum(["SYP", "USD"]).optional(),
+  originalAmount: z.number().finite().positive().optional(),
+  exchangeRate: z.number().finite().positive().optional()
+};
 const optionalIdSchema = z.string().trim().default("");
 
 export const tableCreateSchema = z.object({
@@ -64,9 +69,19 @@ export const cancelOrderSchema = z.object({
   reason: z.string().trim().min(1).default("Cancelled by user")
 });
 
+const paymentPartSchema = z.object({
+  method: z.enum(["CASH", "SHAM_CASH"]),
+  currency: z.enum(["SYP", "USD"]),
+  originalAmount: z.number().finite().positive(),
+  exchangeRate: z.number().finite().positive(),
+  cashRegisterId: optionalIdSchema
+});
 export const completeOrderSchema = z.object({
+  customerName: z.string().trim().optional(),
+  settlementMode: z.enum(["FULL", "DEBT", "PARTIAL"]).optional(),
+  payments: z.array(paymentPartSchema).max(30).optional(),
   paymentMethod: paymentMethodSchema.default("CASH"),
-  paidAmount: z.coerce.number().min(0).optional(),
+  paidAmount: z.coerce.number().finite().min(0).optional(),
   cashRegisterId: optionalIdSchema.optional(),
   note: z.string().trim().default("")
 });
@@ -129,6 +144,8 @@ export const invoiceItemSchema = z.object({
 });
 
 export const invoiceCreateSchema = z.object({
+  settlementMode: z.enum(["FULL", "DEBT", "PARTIAL"]).optional(),
+  payments: z.array(paymentPartSchema).max(30).optional(),
   type: invoiceTypeSchema,
   status: invoiceStatusSchema.default("UNPAID"),
   orderId: optionalIdSchema,
@@ -137,7 +154,7 @@ export const invoiceCreateSchema = z.object({
   discount: z.coerce.number().min(0).default(0),
   tax: z.coerce.number().min(0).default(0),
   serviceCharge: z.coerce.number().min(0).default(0),
-  paidAmount: z.coerce.number().min(0).default(0),
+  paidAmount: z.coerce.number().finite().min(0).default(0),
   paymentMethod: paymentMethodSchema.default("CASH"),
   dueDate: z.string().trim().default(""),
   notes: z.string().trim().default("")
@@ -146,19 +163,24 @@ export const invoiceCreateSchema = z.object({
 export const invoicePatchSchema = invoiceCreateSchema.partial();
 
 export const paymentCreateSchema = z.object({
+  ...moneyFields,
   invoiceId: optionalIdSchema,
   orderId: optionalIdSchema,
   supplierId: optionalIdSchema,
   type: invoiceTypeSchema.default("SALE"),
-  amount: z.coerce.number().positive(),
+  amount: z.coerce.number().finite().positive(),
   method: paymentMethodSchema.default("CASH"),
   note: z.string().trim().default(""),
   paidAt: z.string().trim().optional()
 });
 
 export const expenseCreateSchema = z.object({
+  cashRegisterId: optionalIdSchema,
+  settlementMode: z.enum(["FULL", "DEBT", "PARTIAL"]).optional(),
+  payments: z.array(paymentPartSchema).max(30).optional(),
+  ...moneyFields,
   category: z.string().trim().min(1),
-  amount: z.coerce.number().positive(),
+  amount: z.coerce.number().finite().positive(),
   paymentMethod: paymentMethodSchema.default("CASH"),
   paidAt: z.string().trim().optional(),
   notes: z.string().trim().default("")
@@ -172,9 +194,11 @@ export const cashRegisterCreateSchema = z.object({
 });
 
 export const cashMovementCreateSchema = z.object({
+  ...moneyFields,
+  method: z.enum(["CASH", "SHAM_CASH"]).optional(),
   cashRegisterId: optionalIdSchema,
   type: cashMovementTypeSchema,
-  amount: z.coerce.number().positive(),
+  amount: z.coerce.number().finite().positive(),
   referenceType: z.string().trim().default("MANUAL"),
   referenceId: z.string().trim().default("manual"),
   note: z.string().trim().default("")
@@ -208,3 +232,12 @@ export const reportQuerySchema = z.object({
   from: z.string().trim().optional(),
   to: z.string().trim().optional()
 });
+
+export const invoiceSettlementSchema = z.object({
+  invoiceId: z.string().trim().min(1),
+  settlementMode: z.enum(["FULL", "PARTIAL"]),
+  payments: z.array(paymentPartSchema).min(1).max(30),
+  note: z.string().trim().default("")
+});
+
+export const expenseSettlementSchema = invoiceSettlementSchema.omit({ invoiceId: true }).extend({ expenseId: z.string().trim().min(1) });

@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "restaurants-menu-backend",
     "version":  "0.1.0",
     "private":  true,
@@ -8,6 +8,8 @@
                     "build":  "node ./node_modules/typescript/bin/tsc",
                     "start":  "node dist/server.js",
                     "typecheck":  "node ./node_modules/typescript/bin/tsc --noEmit",
+                    "test:business-day": "npm run build && node --test tests/business-day-settings.test.mjs",
+                    "test:payments": "npm run build && node --experimental-test-module-mocks --test tests/payments.test.mjs tests/financial-transactions.test.mjs tests/sync-idempotency.test.mjs",
                     "seed":  "npm run build && node dist/scripts/seed.js"
                 },
     "dependencies":  {

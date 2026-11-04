@@ -63,6 +63,7 @@ export type Restaurant = {
   phone: string;
   address: string;
   currency: string;
+  usdExchangeRate?: number;
   receiptRestaurantName?: string;
   vatNumber?: string;
   receiptLocation?: string;
@@ -84,6 +85,7 @@ export type Restaurant = {
   customDomainVerifiedAt?: string;
   modules?: Partial<RestaurantModules>;
   timezone?: string;
+  businessDayStartTime?: string;
   taxRate?: number;
   serviceChargeRate?: number;
   createdAt?: string;
@@ -148,7 +150,7 @@ export type Payment = {
 export type TableStatus = "AVAILABLE" | "OCCUPIED" | "RESERVED" | "CLEANING" | "DISABLED";
 export type OrderStatus = "DRAFT" | "PENDING" | "CONFIRMED" | "PREPARING" | "READY" | "SERVED" | "COMPLETED" | "CANCELLED";
 export type OrderType = "DINE_IN" | "TAKEAWAY" | "DELIVERY" | "QR";
-export type PaymentMethod = "CASH" | "CARD" | "BANK_TRANSFER" | "WALLET" | "SPLIT" | "DEBT";
+export type PaymentMethod = "CASH" | "SHAM_CASH" | "CARD" | "BANK_TRANSFER" | "WALLET" | "SPLIT" | "DEBT";
 export type InvoiceType = "SALE" | "PURCHASE" | "REFUND";
 export type InvoiceStatus = "UNPAID" | "PARTIAL" | "PAID" | "VOID";
 export type InventoryTransactionType = "IN" | "OUT" | "ADJUST" | "REVERSE";

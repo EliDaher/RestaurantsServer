@@ -1,7 +1,11 @@
+import { assertPaymentContext } from "../restaurant-ops/payment-context.js";
+import { preparePaymentReversals } from "../restaurant-ops/payment-reversals.js";
+import { prepareExpenseArtifacts } from "../restaurant-ops/expense-artifacts.js";
+import { PaymentValidationError, normalizeMoney, normalizeSettlement } from "../../utils/payments.js";
 import { db, FieldValue } from "../../config/firebase.js";
 import { hasPermission } from "../../services/permissions.js";
 import { HttpError } from "../../utils/http.js";
-import { cancelOrderSchema, cashMovementCreateSchema, completeOrderSchema, expenseCreateSchema, orderCreateSchema, orderPatchSchema } from "../restaurant-ops/validators.js";
+import { expenseSettlementSchema, invoiceSettlementSchema, cancelOrderSchema, cashMovementCreateSchema, completeOrderSchema, expenseCreateSchema, orderCreateSchema, orderPatchSchema } from "../restaurant-ops/validators.js";
 import { ZodError } from "zod";
 import { listChanges, recordChange, recordChanges } from "./change-log.js";
 import { assertSamePayload, duplicateResult, operationRef, payloadHash } from "./idempotency.js";
@@ -31,6 +35,10 @@ async function applyOperation(restaurantId, user, deviceId, operation) {
     }
     if (operation.entityType === "order") {
         return applyOrderOperation(restaurantId, user, deviceId, operation);
+    }
+    if (operation.entityType === "payment") {
+        assertPermissionForSync(user, operation.payload.expenseId ? "expenses.create" : "payments.create");
+        return applyExpenseOperation(restaurantId, user, deviceId, operation);
     }
     if (operation.entityType === "expense") {
         assertPermissionForSync(user, "expenses.create");
@@ -76,7 +84,9 @@ async function applyExpenseOperation(restaurantId, user, deviceId, operation) {
                 code: "operation_registry_incomplete"
             });
         }
-        const prepared = await prepareCreateExpense(transaction, restaurantId, userId, operation);
+        const prepared = operation.entityType === "payment"
+            ? await prepareInvoiceSettlement(transaction, restaurantId, userId, operation, user)
+            : await prepareCreateExpense(transaction, restaurantId, userId, operation);
         const cursors = await recordChanges(transaction, restaurantId, prepared.changes.map((change) => ({
             entityType: change.entityType,
             entityId: change.entityId,
@@ -259,7 +269,7 @@ async function prepareOrderOperation(transaction, restaurantId, userId, operatio
     throw new HttpError(400, `Unsupported order sync action: ${operation.action}`, { code: "unsupported_action" });
 }
 async function prepareCreateExpense(transaction, restaurantId, createdById, operation) {
-    const input = expenseCreateSchema.parse(operation.payload);
+    const input = normalizeMoney(expenseCreateSchema.parse(operation.payload));
     const now = new Date().toISOString();
     const expenseId = operation.entityId;
     const expenseRef = scopedDoc(restaurantId, "expenses", expenseId);
@@ -269,10 +279,14 @@ async function prepareCreateExpense(transaction, restaurantId, createdById, oper
             code: "expense_id_exists"
         });
     }
+    const artifacts = await prepareExpenseArtifacts(transaction, restaurantId, expenseId, input, createdById, now);
     const serverVersion = Date.now();
+    const { payments: _rawPayments, ...expenseInput } = input;
     const expense = {
         id: expenseId,
         restaurantId,
+        ...expenseInput,
+        ...artifacts.metadata,
         category: input.category,
         amount: input.amount,
         paymentMethod: input.paymentMethod,
@@ -285,14 +299,16 @@ async function prepareCreateExpense(transaction, restaurantId, createdById, oper
     return {
         response: { id: expenseId },
         serverVersion,
-        changes: [upsertChange("expense", expenseId, expense)],
+        changes: [upsertChange("expense", expenseId, expense), ...artifacts.records.map(record => upsertChange(record.entityType, record.id, record.data))],
         write: (writeTransaction) => {
+            artifacts.records.forEach(record => writeTransaction.set(scopedDoc(restaurantId, record.collection, record.id), record.data));
             writeTransaction.set(expenseRef, timestampForWrite(withoutId(expense), ["createdAt", "updatedAt"]));
         }
     };
 }
 async function prepareCreateCashMovement(transaction, restaurantId, createdById, operation) {
-    const input = cashMovementCreateSchema.parse(operation.payload);
+    const input = normalizeMoney(cashMovementCreateSchema.parse(operation.payload));
+    await assertPaymentContext(transaction, restaurantId, input);
     const now = new Date().toISOString();
     const movementId = operation.entityId;
     const movementRef = scopedDoc(restaurantId, "cashMovements", movementId);
@@ -302,10 +318,17 @@ async function prepareCreateCashMovement(transaction, restaurantId, createdById,
             code: "cash_movement_id_exists"
         });
     }
+    const registerRef = input.cashRegisterId ? scopedDoc(restaurantId, "cashRegisters", input.cashRegisterId) : null;
+    const registerSnapshot = registerRef ? await transaction.get(registerRef) : null;
+    if (registerRef && !registerSnapshot?.exists)
+        throw new HttpError(404, "الصندوق غير موجود.");
+    const register = registerSnapshot?.exists ? snapshotData(registerSnapshot) : null;
+    const nextRegister = register ? { ...register, currentBalance: register.currentBalance + (input.type === "IN" ? input.amount : -input.amount) } : null;
     const serverVersion = Date.now();
     const movement = {
         id: movementId,
         restaurantId,
+        ...input,
         cashRegisterId: input.cashRegisterId,
         type: input.type,
         amount: input.amount,
@@ -318,9 +341,11 @@ async function prepareCreateCashMovement(transaction, restaurantId, createdById,
     return {
         response: { id: movementId },
         serverVersion,
-        changes: [upsertChange("cashMovement", movementId, movement)],
+        changes: [upsertChange("cashMovement", movementId, movement), ...(nextRegister ? [upsertChange("cashRegister", nextRegister.id, nextRegister)] : [])],
         write: (writeTransaction) => {
             writeTransaction.set(movementRef, timestampForWrite(withoutId(movement), ["createdAt"]));
+            if (registerRef && nextRegister)
+                writeTransaction.update(registerRef, { currentBalance: nextRegister.currentBalance, updatedAt: FieldValue.serverTimestamp() });
         }
     };
 }
@@ -580,6 +605,17 @@ async function prepareCompleteOrder(transaction, restaurantId, orderId, input, c
         const changes = await existingOrderChanges(transaction, restaurantId, order);
         return { response, serverVersion: currentVersion, changes, write: () => undefined };
     }
+    if (input.payments !== undefined) {
+        const restaurantSnap = await transaction.get(db.collection("restaurants").doc(restaurantId));
+        const restaurant = restaurantSnap.data();
+        if ((order.currency ?? restaurant.currency) !== "SYP")
+            throw new HttpError(400, "هذا الطلب ليس مسعراً بالليرة السورية.");
+        if (input.payments.some(row => row.currency === "USD") && !restaurant.usdExchangeRate)
+            throw new HttpError(400, "احفظ سعر الصرف أولاً.");
+    }
+    const settlement = input.payments !== undefined ? normalizeSettlement(order.total, input.settlementMode ?? "FULL", input.payments) : null;
+    if (settlement)
+        input = { ...input, paidAmount: settlement.paidAmount, paymentMethod: settlement.paidAmount === 0 ? "DEBT" : settlement.payments[0]?.method ?? "CASH" };
     if (input.paymentMethod === "SPLIT" && (input.paidAmount === undefined || input.paidAmount <= 0)) {
         throw new HttpError(400, "Split payments require a paid amount");
     }
@@ -587,10 +623,19 @@ async function prepareCompleteOrder(transaction, restaurantId, orderId, input, c
     if (paidAmount > order.total) {
         throw new HttpError(400, "Paid amount cannot exceed order total");
     }
-    const cashRegisterRef = input.cashRegisterId && paidAmount > 0 ? scopedDoc(restaurantId, "cashRegisters", input.cashRegisterId) : null;
-    const cashRegisterSnapshot = cashRegisterRef ? await transaction.get(cashRegisterRef) : null;
-    if (cashRegisterRef && !cashRegisterSnapshot?.exists) {
-        throw new HttpError(404, "Cash register not found", { code: "cash_register_missing" });
+    const rows = settlement?.payments ?? (paidAmount > 0 ? [{ amount: paidAmount, method: input.paymentMethod, cashRegisterId: input.cashRegisterId ?? "" }] : []);
+    const registerChanges = new Map();
+    for (const row of rows) {
+        if (!row.cashRegisterId)
+            continue;
+        let register = registerChanges.get(row.cashRegisterId);
+        if (!register) {
+            const snap = await transaction.get(scopedDoc(restaurantId, "cashRegisters", row.cashRegisterId));
+            if (!snap.exists)
+                throw new HttpError(404, "الصندوق غير موجود");
+            register = snapshotData(snap);
+        }
+        registerChanges.set(row.cashRegisterId, { ...register, currentBalance: numberValue(register.currentBalance) + row.amount });
     }
     const inventoryDeductions = await prepareInventoryDeductions(transaction, restaurantId, order, createdById, now);
     const tableRef = order.tableId ? scopedDoc(restaurantId, "tables", order.tableId) : null;
@@ -598,13 +643,15 @@ async function prepareCompleteOrder(transaction, restaurantId, orderId, input, c
     const remainingAmount = Math.max(order.total - paidAmount, 0);
     const invoiceStatus = remainingAmount === 0 ? "PAID" : paidAmount > 0 ? "PARTIAL" : "UNPAID";
     const paymentStatus = remainingAmount === 0 ? "PAID" : paidAmount > 0 ? "PARTIAL" : "UNPAID";
-    const invoice = orderInvoice(invoiceRef.id, restaurantId, order, input, paidAmount, remainingAmount, invoiceStatus, createdById, now);
-    const payment = paidAmount > 0 ? orderPayment(paymentRef.id, restaurantId, orderId, invoiceRef.id, input, paidAmount, createdById, now) : null;
-    const cashMovement = paidAmount > 0 ? orderCashMovement(cashMovementRef.id, restaurantId, paymentRef.id, input, paidAmount, createdById, now) : null;
+    const invoice = { ...orderInvoice(invoiceRef.id, restaurantId, order, input, paidAmount, remainingAmount, invoiceStatus, createdById, now), ...(settlement ? { payments: settlement.payments, settlementMode: input.settlementMode ?? "FULL" } : {}) };
+    const payments = rows.map((row, index) => ({ ...orderPayment(index === 0 ? paymentRef.id : `${paymentRef.id}_${index}`, restaurantId, orderId, invoiceRef.id, input, row.amount, createdById, now), ...row }));
+    const movements = rows.map((row, index) => ({ ...orderCashMovement(payments[index].id, restaurantId, payments[index].id, input, row.amount, createdById, now), ...row }));
     const journalEntry = orderJournalEntry(journalEntryRef.id, restaurantId, orderId, paidAmount, remainingAmount, order.total, createdById, now);
     const nextOrder = {
         ...order,
         status: "COMPLETED",
+        ...(input.customerName?.trim() ? { customerName: input.customerName.trim() } : {}),
+        ...(settlement ? { payments: settlement.payments, settlementMode: input.settlementMode ?? "FULL" } : {}),
         paidAmount,
         paymentStatus,
         paymentMethod: input.paymentMethod,
@@ -622,19 +669,14 @@ async function prepareCompleteOrder(transaction, restaurantId, orderId, input, c
         currentOrderId: "",
         updatedAt: now
     } : null;
-    const nextCashRegister = cashRegisterSnapshot?.exists ? {
-        ...snapshotData(cashRegisterSnapshot),
-        currentBalance: numberValue(cashRegisterSnapshot.data().currentBalance) + paidAmount,
-        updatedAt: now
-    } : null;
     const changes = [
         upsertChange("order", orderId, nextOrder),
         upsertChange("invoice", invoiceRef.id, invoice),
-        ...(payment ? [upsertChange("payment", paymentRef.id, payment)] : []),
-        ...(cashMovement ? [upsertChange("cashMovement", cashMovementRef.id, cashMovement)] : []),
+        ...payments.map(payment => upsertChange("payment", payment.id, payment)),
+        ...movements.map(movement => upsertChange("cashMovement", movement.id, movement)),
         upsertChange("journalEntry", journalEntryRef.id, journalEntry),
         ...(nextTable && order.tableId ? [upsertChange("table", order.tableId, nextTable)] : []),
-        ...(nextCashRegister && input.cashRegisterId ? [upsertChange("cashRegister", input.cashRegisterId, nextCashRegister)] : []),
+        ...[...registerChanges].map(([id, register]) => upsertChange("cashRegister", id, register)),
         ...inventoryDeductions.changes
     ];
     return {
@@ -644,19 +686,14 @@ async function prepareCompleteOrder(transaction, restaurantId, orderId, input, c
         write: (writeTransaction) => {
             inventoryDeductions.write(writeTransaction);
             writeTransaction.set(invoiceRef, timestampForWrite(withoutId(invoice), ["createdAt", "updatedAt"]));
-            if (payment)
-                writeTransaction.set(paymentRef, timestampForWrite(withoutId(payment), ["createdAt"]));
-            if (cashMovement)
-                writeTransaction.set(cashMovementRef, timestampForWrite(withoutId(cashMovement), ["createdAt"]));
-            if (cashRegisterRef && paidAmount > 0) {
-                writeTransaction.update(cashRegisterRef, {
-                    currentBalance: FieldValue.increment(paidAmount),
-                    updatedAt: FieldValue.serverTimestamp()
-                });
-            }
+            payments.forEach(payment => writeTransaction.set(scopedDoc(restaurantId, "payments", payment.id), timestampForWrite(withoutId(payment), ["createdAt"])));
+            movements.forEach(movement => writeTransaction.set(scopedDoc(restaurantId, "cashMovements", movement.id), timestampForWrite(withoutId(movement), ["createdAt"])));
+            registerChanges.forEach((register, id) => writeTransaction.update(scopedDoc(restaurantId, "cashRegisters", id), { currentBalance: register.currentBalance, updatedAt: FieldValue.serverTimestamp() }));
             writeTransaction.set(journalEntryRef, timestampForWrite(withoutId(journalEntry), ["createdAt", "updatedAt"]));
             writeTransaction.update(orderRef, {
                 status: "COMPLETED",
+                ...(input.customerName?.trim() ? { customerName: input.customerName.trim() } : {}),
+                ...(settlement ? { payments: settlement.payments, settlementMode: input.settlementMode ?? "FULL" } : {}),
                 paidAmount,
                 paymentStatus,
                 paymentMethod: input.paymentMethod,
@@ -698,13 +735,8 @@ async function prepareCancelOrder(transaction, restaurantId, orderId, createdByI
     const originalCashMovementRef = scopedDoc(restaurantId, "cashMovements", `order_${orderId}`);
     const reverseCashMovementRef = scopedDoc(restaurantId, "cashMovements", `cancel_order_${orderId}`);
     const invoiceRef = order.invoiceId ? scopedDoc(restaurantId, "invoices", order.invoiceId) : null;
-    const [invoiceSnapshot, originalCashMovementSnapshot] = await Promise.all([
-        invoiceRef ? transaction.get(invoiceRef) : Promise.resolve(null),
-        transaction.get(originalCashMovementRef)
-    ]);
-    const originalCashMovement = originalCashMovementSnapshot.exists ? snapshotData(originalCashMovementSnapshot) : null;
-    const cashRegisterRef = originalCashMovement?.cashRegisterId ? scopedDoc(restaurantId, "cashRegisters", originalCashMovement.cashRegisterId) : null;
-    const cashRegisterSnapshot = cashRegisterRef ? await transaction.get(cashRegisterRef) : null;
+    const invoiceSnapshot = invoiceRef ? await transaction.get(invoiceRef) : null;
+    const reversals = await preparePaymentReversals(transaction, restaurantId, orderId, createdById, reason, now);
     const inventoryRestorations = order.inventoryDeductedAt
         ? await prepareInventoryRestorations(transaction, restaurantId, order, createdById, reason, now)
         : emptyInventoryMutation();
@@ -735,21 +767,7 @@ async function prepareCancelOrder(transaction, restaurantId, orderId, createdByI
         : null;
     if (reverseJournal)
         changes.push(upsertChange("journalEntry", reverseJournalRef.id, reverseJournal));
-    const reverseCashMovement = originalCashMovement && numberValue(originalCashMovement.amount) > 0
-        ? reverseCashMovementData(reverseCashMovementRef.id, restaurantId, originalCashMovement, orderId, reason, createdById, now)
-        : null;
-    if (reverseCashMovement)
-        changes.push(upsertChange("cashMovement", reverseCashMovementRef.id, reverseCashMovement));
-    const nextCashRegister = originalCashMovement && cashRegisterSnapshot?.exists && numberValue(originalCashMovement.amount) > 0
-        ? {
-            ...snapshotData(cashRegisterSnapshot),
-            currentBalance: numberValue(cashRegisterSnapshot.data().currentBalance) - numberValue(originalCashMovement.amount),
-            updatedAt: now
-        }
-        : null;
-    if (nextCashRegister && originalCashMovement?.cashRegisterId) {
-        changes.push(upsertChange("cashRegister", originalCashMovement.cashRegisterId, nextCashRegister));
-    }
+    changes.push(...reversals.map(record => upsertChange(record.entityType, record.id, record.data)));
     const nextTable = tableSnapshot?.exists ? {
         ...snapshotData(tableSnapshot),
         status: "AVAILABLE",
@@ -775,14 +793,7 @@ async function prepareCancelOrder(transaction, restaurantId, orderId, createdByI
                 writeTransaction.set(refundInvoiceRef, timestampForWrite(withoutId(refundInvoice), ["createdAt", "updatedAt"]));
             if (reverseJournal)
                 writeTransaction.set(reverseJournalRef, timestampForWrite(withoutId(reverseJournal), ["createdAt", "updatedAt"]));
-            if (reverseCashMovement)
-                writeTransaction.set(reverseCashMovementRef, timestampForWrite(withoutId(reverseCashMovement), ["createdAt"]));
-            if (cashRegisterRef && reverseCashMovement) {
-                writeTransaction.update(cashRegisterRef, {
-                    currentBalance: FieldValue.increment(-numberValue(originalCashMovement?.amount)),
-                    updatedAt: FieldValue.serverTimestamp()
-                });
-            }
+            reversals.forEach(record => writeTransaction.set(scopedDoc(restaurantId, record.collection, record.id), record.data));
             writeTransaction.update(orderRef, {
                 status: "CANCELLED",
                 cancelledAt: now,
@@ -1093,7 +1104,9 @@ async function readInventoryItems(transaction, restaurantId, quantities, skipMis
 function orderInvoice(id, restaurantId, order, input, paidAmount, remainingAmount, status, createdById, now) {
     return {
         id,
+        ...(input.customerName?.trim() ? { customerName: input.customerName.trim() } : {}),
         restaurantId,
+        ...(order.currency ? { currency: order.currency } : {}),
         type: "SALE",
         status,
         orderId: order.id,
@@ -1339,6 +1352,8 @@ function conflict(operation, code, message) {
     };
 }
 function errorResult(operation, error) {
+    if (error instanceof PaymentValidationError)
+        return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: { code: "validation_error", message: error.message, retryable: false } };
     if (error instanceof ZodError) {
         return {
             operationId: operation.operationId,
@@ -1412,4 +1427,89 @@ function errorCodeFor(operation, error) {
     if (operation.entityType === "order" && error.status === 404 && /Cash register not found/i.test(error.message))
         return "cash_register_missing";
     return `http_${error.status}`;
+}
+async function prepareInvoiceSettlement(transaction, restaurantId, userId, operation, user) {
+    if (operation.payload.expenseId)
+        return prepareExpensePayment(transaction, restaurantId, userId, operation);
+    const input = invoiceSettlementSchema.parse(operation.payload);
+    const invoiceRef = scopedDoc(restaurantId, "invoices", input.invoiceId);
+    const snapshot = await transaction.get(invoiceRef);
+    if (!snapshot.exists)
+        throw new HttpError(404, "الفاتورة غير موجودة.");
+    const invoice = snapshotData(snapshot);
+    if (invoice.type !== "SALE" && !hasPermission(user.role, "accounting.manage", user.permissions ?? []) && !hasPermission(user.role, "purchasing.manage", user.permissions ?? []))
+        throw new HttpError(403, "ليس لديك صلاحية تسديد هذه الفاتورة.");
+    if (invoice.status === "VOID")
+        throw new HttpError(400, "لا يمكن تسديد فاتورة ملغاة.");
+    await assertPaymentContext(transaction, restaurantId, input, invoice.currency);
+    const settlement = normalizeSettlement(invoice.remainingAmount, input.settlementMode, input.payments);
+    const now = new Date().toISOString();
+    const nextInvoice = { ...invoice, settlementMode: settlement.remainingAmount === 0 ? "FULL" : "PARTIAL", payments: [...(invoice.payments ?? []), ...settlement.payments], paidAmount: invoice.paidAmount + settlement.paidAmount, remainingAmount: settlement.remainingAmount, status: settlement.remainingAmount === 0 ? "PAID" : "PARTIAL", updatedAt: now };
+    const direction = invoice.type === "SALE" ? "IN" : "OUT";
+    const records = [];
+    const add = (entityType, collection, id, data) => records.push({ entityType, collection, id, data: data });
+    add("invoice", "invoices", invoice.id, nextInvoice);
+    const registers = new Map();
+    for (const [index, row] of settlement.payments.entries()) {
+        const id = index === 0 ? operation.entityId : `${operation.entityId}_${index}`;
+        const existingPayment = await transaction.get(scopedDoc(restaurantId, "payments", id));
+        if (existingPayment.exists)
+            throw new HttpError(409, "الدفعة مسجلة سابقاً.");
+        add("payment", "payments", id, { ...row, id, restaurantId, invoiceId: invoice.id, orderId: invoice.orderId, supplierId: invoice.supplierId, type: invoice.type, note: input.note, paidAt: now, createdAt: now, createdById: userId });
+        add("cashMovement", "cashMovements", id, { ...row, id, restaurantId, type: direction, referenceType: "PAYMENT", referenceId: id, note: input.note, createdAt: now, createdById: userId });
+        if (row.cashRegisterId) {
+            let register = registers.get(row.cashRegisterId);
+            if (!register) {
+                const snap = await transaction.get(scopedDoc(restaurantId, "cashRegisters", row.cashRegisterId));
+                if (!snap.exists)
+                    throw new HttpError(404, "الصندوق غير موجود.");
+                register = snapshotData(snap);
+            }
+            registers.set(row.cashRegisterId, { ...register, currentBalance: register.currentBalance + (direction === "IN" ? row.amount : -row.amount), updatedAt: now });
+        }
+    }
+    registers.forEach((register, id) => add("cashRegister", "cashRegisters", id, register));
+    let orderVersion;
+    if (invoice.orderId && invoice.type === "SALE") {
+        const snap = await transaction.get(scopedDoc(restaurantId, "orders", invoice.orderId));
+        if (snap.exists) {
+            const order = snapshotData(snap);
+            orderVersion = nextOrderVersion(currentOrderVersion(order));
+            add("order", "orders", order.id, { ...order, paidAmount: nextInvoice.paidAmount, paymentStatus: nextInvoice.status, settlementMode: nextInvoice.settlementMode, payments: nextInvoice.payments, version: orderVersion, updatedAt: now });
+        }
+    }
+    if (invoice.supplierId && invoice.type === "PURCHASE") {
+        const snap = await transaction.get(scopedDoc(restaurantId, "suppliers", invoice.supplierId));
+        if (!snap.exists)
+            throw new HttpError(404, "المورد غير موجود.");
+        add("supplier", "suppliers", invoice.supplierId, { ...snap.data(), id: invoice.supplierId, balance: numberValue(snap.data()?.balance) - settlement.paidAmount, updatedAt: now });
+    }
+    const amount = settlement.paidAmount;
+    const lines = direction === "IN" ? [{ accountId: "cash", debit: amount, credit: 0, memo: "تسديد فاتورة" }, { accountId: "accounts_receivable", debit: 0, credit: amount, memo: "تسديد دين" }] : [{ accountId: invoice.type === "PURCHASE" ? "accounts_payable" : "sales_returns", debit: amount, credit: 0, memo: "تسديد فاتورة" }, { accountId: "cash", debit: 0, credit: amount, memo: "تسديد فاتورة" }];
+    add("journalEntry", "journalEntries", operation.entityId, { id: operation.entityId, restaurantId, status: "POSTED", referenceType: "PAYMENT", referenceId: operation.entityId, lines, memo: input.note, createdById: userId, postedAt: now, createdAt: now, updatedAt: now });
+    return { response: { invoiceId: invoice.id, ...(invoice.orderId && orderVersion ? { orderId: invoice.orderId, orderVersion } : {}) }, serverVersion: Date.now(), changes: records.map(record => upsertChange(record.entityType, record.id, record.data)), write: tx => records.forEach(record => tx.set(scopedDoc(restaurantId, record.collection, record.id), timestampForWrite(withoutId(record.data), ["createdAt", "updatedAt"]))) };
+}
+async function prepareExpensePayment(tx, restaurantId, userId, operation) {
+    const input = expenseSettlementSchema.parse(operation.payload);
+    const ref = scopedDoc(restaurantId, "expenses", input.expenseId);
+    const snapshot = await tx.get(ref);
+    if (!snapshot.exists)
+        throw new HttpError(404, "المصروف غير موجود.");
+    const expense = snapshotData(snapshot);
+    const settlement = normalizeSettlement(expense.remainingAmount ?? 0, input.settlementMode, input.payments);
+    const now = new Date().toISOString();
+    const artifacts = await prepareExpenseArtifacts(tx, restaurantId, operation.entityId, { amount: settlement.paidAmount, paymentMethod: "CASH", payments: input.payments, settlementMode: "FULL", notes: input.note }, userId, now);
+    const updated = { ...expense, settlementMode: settlement.remainingAmount === 0 ? "FULL" : "PARTIAL", payments: [...(expense.payments ?? []), ...settlement.payments], paidAmount: (expense.paidAmount ?? 0) + settlement.paidAmount, remainingAmount: settlement.remainingAmount, updatedAt: now };
+    const changes = [upsertChange("expense", expense.id, updated)];
+    artifacts.records.forEach(record => {
+        if (record.entityType !== "cashRegister")
+            record.data.referenceId = expense.id;
+        if (record.entityType === "journalEntry")
+            record.data.lines = [{ accountId: "accounts_payable", debit: settlement.paidAmount, credit: 0, memo: input.note }, { accountId: "cash", debit: 0, credit: settlement.paidAmount, memo: input.note }];
+        changes.push(upsertChange(record.entityType, record.id, record.data));
+    });
+    return { response: { expenseId: expense.id }, serverVersion: Date.now(), changes, write: transaction => {
+            transaction.set(ref, updated);
+            artifacts.records.forEach(record => transaction.set(scopedDoc(restaurantId, record.collection, record.id), record.data));
+        } };
 }

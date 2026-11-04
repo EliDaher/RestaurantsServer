@@ -1,3 +1,4 @@
+import type { NormalizedPaymentPart, SettlementMode } from "../../utils/payments.js";
 import type {
   CashMovementType,
   InventoryTransactionType,
@@ -34,6 +35,10 @@ export type OrderLine = {
 };
 
 export type Order = {
+  customerName?: string;
+  currency?: string;
+  settlementMode?: SettlementMode;
+  payments?: NormalizedPaymentPart[];
   id: string;
   restaurantId: string;
   name: string;
@@ -125,6 +130,10 @@ export type InvoiceItem = {
 };
 
 export type Invoice = {
+  customerName?: string;
+  currency?: string;
+  settlementMode?: SettlementMode;
+  payments?: NormalizedPaymentPart[];
   id: string;
   restaurantId: string;
   type: InvoiceType;
@@ -148,6 +157,9 @@ export type Invoice = {
 };
 
 export type OperationalPayment = {
+  currency?: "SYP" | "USD";
+  originalAmount?: number;
+  exchangeRate?: number;
   id: string;
   restaurantId: string;
   invoiceId: string;
@@ -163,6 +175,14 @@ export type OperationalPayment = {
 };
 
 export type Expense = {
+  payments?: NormalizedPaymentPart[];
+  settlementMode?: SettlementMode;
+  paidAmount?: number;
+  remainingAmount?: number;
+  cashRegisterId?: string;
+  currency?: "SYP" | "USD";
+  originalAmount?: number;
+  exchangeRate?: number;
   id: string;
   restaurantId: string;
   category: string;
@@ -191,6 +211,10 @@ export type CashRegister = {
 };
 
 export type CashMovement = {
+  method?: PaymentMethod;
+  currency?: "SYP" | "USD";
+  originalAmount?: number;
+  exchangeRate?: number;
   id: string;
   restaurantId: string;
   cashRegisterId: string;

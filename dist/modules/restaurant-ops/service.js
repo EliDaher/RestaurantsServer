@@ -1,3 +1,7 @@
+import { assertPaymentContext } from "./payment-context.js";
+import { preparePaymentReversals } from "./payment-reversals.js";
+import { prepareExpenseArtifacts } from "./expense-artifacts.js";
+import { normalizeMoney, normalizeSettlement } from "../../utils/payments.js";
 import { randomUUID } from "node:crypto";
 import { db, FieldValue } from "../../config/firebase.js";
 import { HttpError } from "../../utils/http.js";
@@ -296,10 +300,7 @@ export async function cancelOrder(restaurantId, orderId, createdById, reason) {
             return;
         const invoiceRef = order.invoiceId ? scopedDoc(restaurantId, "invoices", order.invoiceId) : null;
         const invoiceSnapshot = invoiceRef ? await transaction.get(invoiceRef) : null;
-        const originalCashMovementSnapshot = await transaction.get(originalCashMovementRef);
-        const originalCashMovement = originalCashMovementSnapshot.exists ? originalCashMovementSnapshot.data() : null;
-        const cashRegisterRef = originalCashMovement?.cashRegisterId ? scopedDoc(restaurantId, "cashRegisters", originalCashMovement.cashRegisterId) : null;
-        const cashRegisterSnapshot = cashRegisterRef ? await transaction.get(cashRegisterRef) : null;
+        const reversals = await preparePaymentReversals(transaction, restaurantId, orderId, createdById, reason, new Date().toISOString());
         if (order.inventoryDeductedAt) {
             await restoreRecipeInventory(transaction, restaurantId, order, createdById, reason);
         }
@@ -350,23 +351,7 @@ export async function cancelOrder(restaurantId, orderId, createdById, reason) {
                 createdAt: FieldValue.serverTimestamp(),
                 updatedAt: FieldValue.serverTimestamp()
             });
-            if (originalCashMovement && cashRegisterRef && cashRegisterSnapshot?.exists && numberValue(originalCashMovement.amount) > 0) {
-                transaction.set(reverseCashMovementRef, {
-                    restaurantId,
-                    cashRegisterId: originalCashMovement.cashRegisterId,
-                    type: "OUT",
-                    amount: numberValue(originalCashMovement.amount),
-                    referenceType: "ORDER_CANCEL",
-                    referenceId: orderId,
-                    note: reason,
-                    createdById,
-                    createdAt: FieldValue.serverTimestamp()
-                });
-                transaction.update(cashRegisterRef, {
-                    currentBalance: FieldValue.increment(-numberValue(originalCashMovement.amount)),
-                    updatedAt: FieldValue.serverTimestamp()
-                });
-            }
+            reversals.forEach(record => transaction.set(scopedDoc(restaurantId, record.collection, record.id), record.data));
         }
         transaction.update(orderRef, {
             status: "CANCELLED",
@@ -386,6 +371,7 @@ export async function cancelOrder(restaurantId, orderId, createdById, reason) {
     return { ok: true };
 }
 export async function completeOrder(restaurantId, orderId, input, createdById) {
+    const customerName = input.customerName?.trim();
     const orderRef = scopedDoc(restaurantId, "orders", orderId);
     const invoiceRef = scopedDoc(restaurantId, "invoices", `order_${orderId}`);
     const paymentRef = scopedDoc(restaurantId, "payments", `order_${orderId}`);
@@ -404,6 +390,17 @@ export async function completeOrder(restaurantId, orderId, input, createdById) {
         if (order.invoiceId) {
             return;
         }
+        if (input.payments !== undefined) {
+            const restaurantSnap = await transaction.get(db.collection("restaurants").doc(restaurantId));
+            const restaurant = restaurantSnap.data();
+            if ((order.currency ?? restaurant.currency) !== "SYP")
+                throw new HttpError(400, "هذا الطلب ليس مسعراً بالليرة السورية.");
+            if (input.payments.some(row => row.currency === "USD") && !restaurant.usdExchangeRate)
+                throw new HttpError(400, "احفظ سعر الصرف أولاً.");
+        }
+        const settlement = input.payments !== undefined ? normalizeSettlement(order.total, input.settlementMode ?? "FULL", input.payments) : null;
+        if (settlement)
+            input = { ...input, paidAmount: settlement.paidAmount, paymentMethod: settlement.paidAmount === 0 ? "DEBT" : settlement.payments[0]?.method ?? "CASH" };
         if (input.paymentMethod === "SPLIT" && (input.paidAmount === undefined || input.paidAmount <= 0)) {
             throw new HttpError(400, "Split payments require a paid amount");
         }
@@ -414,13 +411,21 @@ export async function completeOrder(restaurantId, orderId, input, createdById) {
         const remainingAmount = Math.max(order.total - paidAmount, 0);
         const invoiceStatus = remainingAmount === 0 ? "PAID" : paidAmount > 0 ? "PARTIAL" : "UNPAID";
         const paymentStatus = remainingAmount === 0 ? "PAID" : paidAmount > 0 ? "PARTIAL" : "UNPAID";
-        const cashRegisterRef = input.cashRegisterId && paidAmount > 0 ? scopedDoc(restaurantId, "cashRegisters", input.cashRegisterId) : null;
-        const cashRegisterSnapshot = cashRegisterRef ? await transaction.get(cashRegisterRef) : null;
-        if (cashRegisterRef && !cashRegisterSnapshot?.exists) {
-            throw new HttpError(404, "Cash register not found", { code: "cash_register_missing" });
+        const rows = settlement?.payments ?? (paidAmount > 0 ? [{ amount: paidAmount, method: input.paymentMethod, cashRegisterId: input.cashRegisterId ?? "" }] : []);
+        const registers = new Map();
+        for (const row of rows) {
+            if (!row.cashRegisterId || registers.has(row.cashRegisterId))
+                continue;
+            const ref = scopedDoc(restaurantId, "cashRegisters", row.cashRegisterId);
+            const snap = await transaction.get(ref);
+            if (!snap.exists)
+                throw new HttpError(404, "الصندوق غير موجود");
+            registers.set(row.cashRegisterId, ref);
         }
         await deductRecipeInventory(transaction, restaurantId, order, createdById);
         transaction.set(invoiceRef, {
+            ...(customerName ? { customerName } : {}),
+            ...(order.currency ? { currency: order.currency } : {}),
             restaurantId,
             type: "SALE",
             status: invoiceStatus,
@@ -438,6 +443,7 @@ export async function completeOrder(restaurantId, orderId, input, createdById) {
             tax: order.tax,
             serviceCharge: order.serviceCharge,
             total: order.total,
+            ...(settlement ? { payments: settlement.payments, settlementMode: input.settlementMode ?? "FULL" } : {}),
             paidAmount,
             remainingAmount,
             paymentMethod: input.paymentMethod,
@@ -447,38 +453,20 @@ export async function completeOrder(restaurantId, orderId, input, createdById) {
             createdAt: FieldValue.serverTimestamp(),
             updatedAt: FieldValue.serverTimestamp()
         });
-        if (paidAmount > 0) {
-            transaction.set(paymentRef, {
-                restaurantId,
-                invoiceId: invoiceRef.id,
-                orderId,
-                supplierId: "",
-                type: "SALE",
-                amount: paidAmount,
-                method: input.paymentMethod,
-                note: input.note,
-                createdById,
-                paidAt: new Date().toISOString(),
-                createdAt: FieldValue.serverTimestamp()
+        rows.forEach((row, index) => {
+            const id = index === 0 ? paymentRef.id : `${paymentRef.id}_${index}`;
+            transaction.set(scopedDoc(restaurantId, "payments", id), {
+                ...row, restaurantId, invoiceId: invoiceRef.id, orderId, supplierId: "", type: "SALE",
+                note: input.note, createdById, paidAt: new Date().toISOString(), createdAt: FieldValue.serverTimestamp()
             });
-            transaction.set(cashMovementRef, {
-                restaurantId,
-                cashRegisterId: input.cashRegisterId ?? "",
-                type: "IN",
-                amount: paidAmount,
-                referenceType: "PAYMENT",
-                referenceId: paymentRef.id,
-                note: input.note,
-                createdById,
-                createdAt: FieldValue.serverTimestamp()
+            transaction.set(scopedDoc(restaurantId, "cashMovements", id), {
+                ...row, restaurantId, type: "IN", referenceType: "PAYMENT", referenceId: id,
+                note: input.note, createdById, createdAt: FieldValue.serverTimestamp()
             });
-            if (cashRegisterRef) {
-                transaction.update(cashRegisterRef, {
-                    currentBalance: FieldValue.increment(paidAmount),
-                    updatedAt: FieldValue.serverTimestamp()
-                });
-            }
-        }
+            const registerRef = registers.get(row.cashRegisterId);
+            if (registerRef)
+                transaction.update(registerRef, { currentBalance: FieldValue.increment(row.amount), updatedAt: FieldValue.serverTimestamp() });
+        });
         transaction.set(journalEntryRef, {
             restaurantId,
             status: "POSTED",
@@ -493,6 +481,8 @@ export async function completeOrder(restaurantId, orderId, input, createdById) {
         });
         transaction.update(orderRef, {
             status: "COMPLETED",
+            ...(customerName ? { customerName } : {}),
+            ...(settlement ? { payments: settlement.payments, settlementMode: input.settlementMode ?? "FULL" } : {}),
             paidAmount,
             paymentStatus,
             paymentMethod: input.paymentMethod,
@@ -524,23 +514,68 @@ export function listInvoices(restaurantId) {
 export function getInvoice(restaurantId, invoiceId) {
     return getScoped(restaurantId, "invoices", invoiceId);
 }
-export function createInvoice(restaurantId, input, createdById) {
-    const items = input.items.map((item) => ({ ...item, total: item.total || item.quantity * item.unitPrice }));
+export async function createInvoice(restaurantId, input, createdById) {
+    const items = input.items.map(item => ({ ...item, total: item.total ?? item.quantity * item.unitPrice }));
     const subTotal = items.reduce((sum, item) => sum + item.total, 0);
     const total = Math.max(subTotal - input.discount + input.tax + input.serviceCharge, 0);
-    const remainingAmount = Math.max(total - input.paidAmount, 0);
-    return createScoped(restaurantId, "invoices", {
-        ...input,
-        items,
-        subTotal,
-        total,
-        remainingAmount,
-        status: remainingAmount === 0 ? "PAID" : input.paidAmount > 0 ? "PARTIAL" : input.status,
-        createdById
+    const settlement = input.payments !== undefined ? normalizeSettlement(total, input.settlementMode ?? "DEBT", input.payments) : null;
+    const paidAmount = settlement?.paidAmount ?? input.paidAmount;
+    if (paidAmount > total)
+        throw new HttpError(400, "المدفوع أكبر من إجمالي الفاتورة.");
+    const remainingAmount = total - paidAmount;
+    const invoiceRef = scopedCollection(restaurantId, "invoices").doc(randomUUID());
+    await db.runTransaction(async (tx) => {
+        const restaurantSnap = await tx.get(db.collection("restaurants").doc(restaurantId));
+        const restaurant = restaurantSnap.data();
+        if (settlement && restaurant.currency !== "SYP")
+            throw new HttpError(400, "الحسابات الجديدة بالعملتين تتطلب التسعير بالليرة السورية.");
+        if (settlement?.payments.some(row => row.currency === "USD") && !restaurant.usdExchangeRate)
+            throw new HttpError(400, "احفظ سعر الصرف أولاً.");
+        const registers = new Map();
+        const rows = settlement?.payments ?? (paidAmount > 0 ? [{ method: input.paymentMethod, cashRegisterId: "", amount: paidAmount }] : []);
+        const direction = input.type === "SALE" ? "IN" : "OUT";
+        for (const row of rows) {
+            if (!row.cashRegisterId)
+                continue;
+            let register = registers.get(row.cashRegisterId);
+            if (!register) {
+                const snap = await tx.get(scopedDoc(restaurantId, "cashRegisters", row.cashRegisterId));
+                if (!snap.exists)
+                    throw new HttpError(404, "الصندوق غير موجود.");
+                register = { ...snap.data(), id: snap.id };
+            }
+            registers.set(row.cashRegisterId, { ...register, currentBalance: register.currentBalance + (direction === "IN" ? row.amount : -row.amount) });
+        }
+        const supplierRef = input.supplierId && input.type === "PURCHASE" ? scopedDoc(restaurantId, "suppliers", input.supplierId) : null;
+        const supplier = supplierRef ? await tx.get(supplierRef) : null;
+        if (supplierRef && !supplier?.exists)
+            throw new HttpError(404, "المورد غير موجود.");
+        tx.set(invoiceRef, { ...input, currency: restaurant.currency, ...(settlement ? { payments: settlement.payments } : {}), items, subTotal, total, paidAmount, remainingAmount, status: remainingAmount === 0 ? "PAID" : paidAmount > 0 ? "PARTIAL" : "UNPAID", restaurantId, createdById, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+        rows.forEach((row, index) => {
+            const id = `invoice_${invoiceRef.id}_${index}`;
+            tx.set(scopedDoc(restaurantId, "payments", id), { ...row, restaurantId, invoiceId: invoiceRef.id, orderId: input.orderId, supplierId: input.supplierId, type: input.type, note: input.notes, createdById, paidAt: new Date().toISOString(), createdAt: FieldValue.serverTimestamp() });
+            tx.set(scopedDoc(restaurantId, "cashMovements", id), { ...row, restaurantId, type: direction, referenceType: "PAYMENT", referenceId: id, note: input.notes, createdById, createdAt: FieldValue.serverTimestamp() });
+        });
+        registers.forEach((register, id) => tx.update(scopedDoc(restaurantId, "cashRegisters", id), { currentBalance: register.currentBalance, updatedAt: FieldValue.serverTimestamp() }));
+        if (supplierRef)
+            tx.update(supplierRef, { balance: FieldValue.increment(remainingAmount), updatedAt: FieldValue.serverTimestamp() });
+        const lines = input.type === "SALE" ? buildSaleJournalLines(paidAmount, remainingAmount, total) : [{ accountId: input.type === "PURCHASE" ? "purchases" : "sales_returns", debit: total, credit: 0, memo: "فاتورة" }, ...(paidAmount ? [{ accountId: "cash", debit: 0, credit: paidAmount, memo: "سداد" }] : []), ...(remainingAmount ? [{ accountId: "accounts_payable", debit: 0, credit: remainingAmount, memo: "متبقي" }] : [])];
+        tx.set(scopedDoc(restaurantId, "journalEntries", `invoice_${invoiceRef.id}`), { restaurantId, status: "POSTED", referenceType: "INVOICE", referenceId: invoiceRef.id, lines, memo: input.notes, createdById, postedAt: new Date().toISOString(), createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
     });
+    return { id: invoiceRef.id };
 }
 export async function updateInvoice(restaurantId, invoiceId, input) {
     const current = await getInvoice(restaurantId, invoiceId);
+    if (current.payments !== undefined && !current.orderId && current.paidAmount === 0) {
+        const requestedItems = input.items ? input.items.map(item => ({ ...item, total: item.total ?? item.quantity * item.unitPrice })) : current.items;
+        if (JSON.stringify(requestedItems) !== JSON.stringify(current.items) || (input.discount !== undefined && input.discount !== current.discount) || (input.tax !== undefined && input.tax !== current.tax) || (input.serviceCharge !== undefined && input.serviceCharge !== current.serviceCharge) || (input.type !== undefined && input.type !== current.type) || (input.supplierId !== undefined && input.supplierId !== current.supplierId) || (input.status !== undefined && input.status !== current.status) || input.paidAmount || input.payments !== undefined)
+            throw new HttpError(400, "لتغيير مبالغ الفاتورة غير المسددة، احذفها وأعد إنشاءها.");
+        return updateScoped(restaurantId, "invoices", invoiceId, { notes: input.notes ?? current.notes, dueDate: input.dueDate ?? current.dueDate });
+    }
+    if (current.orderId || current.paidAmount > 0)
+        throw new HttpError(400, "لا يمكن تعديل فاتورة مرتبطة بطلب أو تحتوي على دفعات. استخدم تسديد الفاتورة.");
+    if (input.paidAmount || input.payments?.length)
+        throw new HttpError(400, "سجّل الدفعات من تسديد الفاتورة.");
     const items = input.items ? input.items.map((item) => ({ ...item, total: item.total || item.quantity * item.unitPrice })) : current.items;
     const subTotal = items.reduce((sum, item) => sum + numberValue(item.total), 0);
     const discount = input.discount ?? current.discount;
@@ -562,8 +597,25 @@ export async function updateInvoice(restaurantId, invoiceId, input) {
         status: input.status ?? (remainingAmount === 0 ? "PAID" : paidAmount > 0 ? "PARTIAL" : "UNPAID")
     });
 }
-export function deleteInvoice(restaurantId, invoiceId) {
-    return deleteScoped(restaurantId, "invoices", invoiceId);
+export async function deleteInvoice(restaurantId, invoiceId) {
+    await db.runTransaction(async (tx) => {
+        const ref = scopedDoc(restaurantId, "invoices", invoiceId);
+        const snapshot = await tx.get(ref);
+        if (!snapshot.exists)
+            return;
+        const invoice = snapshot.data();
+        if (invoice.orderId || invoice.paidAmount > 0)
+            throw new HttpError(400, "لا يمكن حذف فاتورة مرتبطة بطلب أو دفعات. استخدم إلغاء الطلب عند الحاجة.");
+        const journalRef = scopedDoc(restaurantId, "journalEntries", `invoice_${invoiceId}`);
+        const journal = await tx.get(journalRef);
+        const supplierRef = invoice.type === "PURCHASE" && invoice.supplierId && journal.exists ? scopedDoc(restaurantId, "suppliers", invoice.supplierId) : null;
+        const supplier = supplierRef ? await tx.get(supplierRef) : null;
+        if (supplier?.exists && supplierRef)
+            tx.update(supplierRef, { balance: FieldValue.increment(-invoice.remainingAmount), updatedAt: FieldValue.serverTimestamp() });
+        if (journal.exists)
+            tx.delete(journalRef);
+        tx.delete(ref);
+    });
 }
 export function listPayments(restaurantId) {
     return listScoped(restaurantId, "payments");
@@ -572,6 +624,7 @@ export function getPayment(restaurantId, paymentId) {
     return getScoped(restaurantId, "payments", paymentId);
 }
 export function createPayment(restaurantId, input, createdById) {
+    input = normalizeMoney(input);
     return createScoped(restaurantId, "payments", {
         ...input,
         paidAt: input.paidAt ?? new Date().toISOString(),
@@ -587,18 +640,61 @@ export function listExpenses(restaurantId) {
 export function getExpense(restaurantId, expenseId) {
     return getScoped(restaurantId, "expenses", expenseId);
 }
-export function createExpense(restaurantId, input, createdById) {
-    return createScoped(restaurantId, "expenses", {
-        ...input,
-        paidAt: input.paidAt ?? new Date().toISOString(),
-        createdById
+export async function createExpense(restaurantId, input, createdById) {
+    input = normalizeMoney(input);
+    const ref = scopedCollection(restaurantId, "expenses").doc(randomUUID());
+    await db.runTransaction(async (tx) => {
+        const now = new Date().toISOString();
+        const artifacts = await prepareExpenseArtifacts(tx, restaurantId, ref.id, input, createdById, now);
+        tx.set(ref, { ...input, ...artifacts.metadata, restaurantId, createdById, paidAt: input.paidAt ?? now, createdAt: now, updatedAt: now });
+        artifacts.records.forEach(record => tx.set(scopedDoc(restaurantId, record.collection, record.id), record.data));
     });
+    return { id: ref.id };
 }
-export function updateExpense(restaurantId, expenseId, input) {
+export async function updateExpense(restaurantId, expenseId, input) {
+    if (input.currency && input.amount !== undefined)
+        input = normalizeMoney({ ...input, amount: input.amount });
+    const current = await getExpense(restaurantId, expenseId);
+    const journal = await scopedDoc(restaurantId, "journalEntries", `expense_${expenseId}`).get();
+    if (journal.exists) {
+        if ((input.amount !== undefined && input.amount !== current.amount) || (input.currency !== undefined && input.currency !== current.currency) || (input.paymentMethod !== undefined && input.paymentMethod !== current.paymentMethod) || input.payments !== undefined || input.settlementMode !== undefined)
+            throw new HttpError(400, "لتغيير دفعات المصروف، احذفه وأعد تسجيله بالقيم الصحيحة.");
+        return updateScoped(restaurantId, "expenses", expenseId, { category: input.category ?? current.category, notes: input.notes ?? current.notes, paidAt: input.paidAt ?? current.paidAt });
+    }
     return updateScoped(restaurantId, "expenses", expenseId, input);
 }
-export function deleteExpense(restaurantId, expenseId) {
-    return deleteScoped(restaurantId, "expenses", expenseId);
+export async function deleteExpense(restaurantId, expenseId) {
+    await db.runTransaction(async (tx) => {
+        const ref = scopedDoc(restaurantId, "expenses", expenseId);
+        const expenseSnap = await tx.get(ref);
+        if (!expenseSnap.exists)
+            return;
+        const movements = await tx.get(scopedCollection(restaurantId, "cashMovements").where("referenceId", "==", expenseId));
+        const journalRef = scopedDoc(restaurantId, "journalEntries", `expense_${expenseId}`);
+        const journal = await tx.get(journalRef);
+        const expenseJournals = await tx.get(scopedCollection(restaurantId, "journalEntries").where("referenceId", "==", expenseId));
+        const registers = new Map();
+        for (const movement of movements.docs) {
+            const data = movement.data();
+            if (data.referenceType !== "EXPENSE" || !data.cashRegisterId)
+                continue;
+            if (!registers.has(data.cashRegisterId)) {
+                const snap = await tx.get(scopedDoc(restaurantId, "cashRegisters", data.cashRegisterId));
+                if (!snap.exists)
+                    throw new HttpError(404, "الصندوق غير موجود.");
+                registers.set(data.cashRegisterId, numberValue(snap.data()?.currentBalance));
+            }
+            registers.set(data.cashRegisterId, registers.get(data.cashRegisterId) + data.amount);
+        }
+        movements.docs.forEach(movement => { if (movement.data().referenceType === "EXPENSE")
+            tx.delete(movement.ref); });
+        registers.forEach((balance, id) => tx.update(scopedDoc(restaurantId, "cashRegisters", id), { currentBalance: balance, updatedAt: FieldValue.serverTimestamp() }));
+        if (journal.exists)
+            tx.delete(journalRef);
+        expenseJournals.docs.forEach(doc => { if (doc.data().referenceType === "EXPENSE")
+            tx.delete(doc.ref); });
+        tx.delete(ref);
+    });
 }
 export function listCashRegisters(restaurantId) {
     return listScoped(restaurantId, "cashRegisters");
@@ -624,11 +720,20 @@ export function listCashMovements(restaurantId) {
 export function getCashMovement(restaurantId, cashMovementId) {
     return getScoped(restaurantId, "cashMovements", cashMovementId);
 }
-export function createCashMovement(restaurantId, input, createdById) {
-    return createScoped(restaurantId, "cashMovements", {
-        ...input,
-        createdById
+export async function createCashMovement(restaurantId, input, createdById) {
+    input = normalizeMoney(input);
+    const ref = scopedCollection(restaurantId, "cashMovements").doc(randomUUID());
+    await db.runTransaction(async (tx) => {
+        await assertPaymentContext(tx, restaurantId, input);
+        const registerRef = input.cashRegisterId ? scopedDoc(restaurantId, "cashRegisters", input.cashRegisterId) : null;
+        const register = registerRef ? await tx.get(registerRef) : null;
+        if (registerRef && !register?.exists)
+            throw new HttpError(404, "الصندوق غير موجود.");
+        tx.set(ref, { ...input, restaurantId, createdById, createdAt: FieldValue.serverTimestamp() });
+        if (registerRef)
+            tx.update(registerRef, { currentBalance: FieldValue.increment(input.type === "IN" ? input.amount : -input.amount), updatedAt: FieldValue.serverTimestamp() });
     });
+    return { id: ref.id };
 }
 export function listAccounts(restaurantId) {
     return listScoped(restaurantId, "accounts");
@@ -671,7 +776,7 @@ export async function getReportsSummary(restaurantId, from, to) {
     const filterTo = to ?? filterFrom;
     const rangedPayments = payments.filter((payment) => isWithinDateRange(payment.paidAt, filterFrom, filterTo));
     const rangedExpenses = expenses.filter((expense) => isWithinDateRange(expense.paidAt, filterFrom, filterTo));
-    const sales = rangedPayments.filter((payment) => payment.type === "SALE").reduce((sum, payment) => sum + numberValue(payment.amount), 0);
+    const sales = rangedPayments.filter((payment) => payment.type === "SALE" || payment.type === "REFUND").reduce((sum, payment) => sum + (payment.type === "REFUND" ? -1 : 1) * numberValue(payment.amount), 0);
     const purchases = invoices.filter((invoice) => invoice.type === "PURCHASE").reduce((sum, invoice) => sum + numberValue(invoice.total), 0);
     const expenseTotal = rangedExpenses.reduce((sum, expense) => sum + numberValue(expense.amount), 0);
     const lowStockItems = inventoryItems.filter((item) => numberValue(item.currentQuantity) <= numberValue(item.minimumQuantity));
