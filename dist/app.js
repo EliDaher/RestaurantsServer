@@ -1,3 +1,4 @@
+import { waiterRouter, ownerWaitersRouter } from "./routes/waiter.js";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
@@ -24,6 +25,8 @@ export function createApp() {
     });
     app.use("/api", publicRouter);
     app.use("/api/auth", authRouter);
+    app.use("/api/owner/waiters", ownerWaitersRouter);
+    app.use("/api/waiter", waiterRouter);
     app.use("/api/owner", ownerRouter);
     app.use("/api/admin", adminRouter);
     app.use(notFound);

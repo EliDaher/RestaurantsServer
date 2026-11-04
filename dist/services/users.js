@@ -83,7 +83,7 @@ export async function updateUser(userId, input) {
 }
 export async function authenticateUser(email, password) {
     const user = await findUserByEmail(email);
-    if (!user || !user.isActive || !(await verifyPassword(password, user.passwordHash))) {
+    if (!user || user.role === "WAITER" || !user.isActive || !(await verifyPassword(password, user.passwordHash))) {
         throw new HttpError(401, "Invalid email or password");
     }
     return user;
