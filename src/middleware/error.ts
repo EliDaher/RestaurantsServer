@@ -1,5 +1,5 @@
 import { PaymentValidationError } from "../utils/payments.js";
-﻿import type { NextFunction, Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import { ZodError } from "zod";
 import { HttpError } from "../utils/http.js";
 
@@ -7,14 +7,27 @@ export function notFound(req: Request, _res: Response, next: NextFunction) {
   next(new HttpError(404, `Route not found: ${req.method} ${req.path}`));
 }
 
-export function errorHandler(error: unknown, _req: Request, res: Response, _next: NextFunction) {
-  if (error instanceof PaymentValidationError) return res.status(400).json({ error: { message: error.message, details: { code: "validation_error" } } });
+export function errorHandler(
+  error: unknown,
+  _req: Request,
+  res: Response,
+  _next: NextFunction,
+) {
+  if (error instanceof PaymentValidationError)
+    return res
+      .status(400)
+      .json({
+        error: {
+          message: error.message,
+          details: { code: "validation_error" },
+        },
+      });
   if (error instanceof ZodError) {
     return res.status(400).json({
       error: {
         message: "Validation failed",
-        details: error.flatten()
-      }
+        details: error.flatten(),
+      },
     });
   }
 
@@ -22,8 +35,8 @@ export function errorHandler(error: unknown, _req: Request, res: Response, _next
     return res.status(error.status).json({
       error: {
         message: error.message,
-        details: error.details
-      }
+        details: error.details,
+      },
     });
   }
 
@@ -33,13 +46,29 @@ export function errorHandler(error: unknown, _req: Request, res: Response, _next
     return res.status(firebaseError.status).json({
       error: {
         message: firebaseError.message,
-        details: firebaseError.details
-      }
+        details: firebaseError.details,
+      },
     });
   }
 
-  console.error(error);
-  return res.status(500).json({ error: { message: "Internal server error" } });
+ console.error("=== UNHANDLED SERVER ERROR ===");
+
+ console.error("Error:", error);
+
+ if (error instanceof Error) {
+   console.error("Name:", error.name);
+   console.error("Message:", error.message);
+   console.error("Stack:", error.stack);
+ }
+
+ console.error("==============================");
+
+ return res.status(500).json({
+   error: {
+     message: "Internal server error",
+     error
+   },
+ });
 }
 
 function getFirebaseServiceError(error: unknown) {
@@ -58,24 +87,29 @@ function getFirebaseServiceError(error: unknown) {
     };
   };
 
-  if (candidate.reason === "SERVICE_DISABLED" || candidate.details?.includes("Cloud Firestore API")) {
+  if (
+    candidate.reason === "SERVICE_DISABLED" ||
+    candidate.details?.includes("Cloud Firestore API")
+  ) {
     return {
       status: 503,
       message: "Cloud Firestore API is disabled for this Firebase project.",
       details: {
-        action: "Enable Cloud Firestore API, then wait a few minutes and retry.",
+        action:
+          "Enable Cloud Firestore API, then wait a few minutes and retry.",
         activationUrl: candidate.errorInfoMetadata?.activationUrl,
         service: candidate.errorInfoMetadata?.service,
-        consumer: candidate.errorInfoMetadata?.consumer
-      }
+        consumer: candidate.errorInfoMetadata?.consumer,
+      },
     };
   }
 
   if (candidate.code === 7 || candidate.code === "7") {
     return {
       status: 403,
-      message: "Firebase rejected the request. Check Firestore permissions and service account access.",
-      details: candidate.details
+      message:
+        "Firebase rejected the request. Check Firestore permissions and service account access.",
+      details: candidate.details,
     };
   }
 

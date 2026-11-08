@@ -7,6 +7,7 @@ class TestFirestore {
   records = new Map();
   versions = new Map();
   epochs = new Map();
+  queryReads = [];
   collection(path) { return new Collection(this, path); }
   seed(path, data) {
     this.records.set(path, structuredClone(data));
@@ -40,8 +41,12 @@ class TestFirestore {
 class Collection {
   constructor(db, path) { this.db = db; this.path = path; }
   doc(id) { return new Doc(this.db, `${this.path}/${id}`); }
-  where(key, op, value) { const query = new Collection(this.db,this.path); query.filters = [...(this.filters??[]), [key,value]]; return query; }
-  async get() { return {docs:[...this.db.records].filter(([path,data])=>path.substring(0,path.lastIndexOf("/"))===this.path && (this.filters??[]).every(([key,value])=>data[key]===value)).map(([path,data])=>({id:path.split("/").at(-1),data:()=>structuredClone(data)}))}; }
+  where(key, op, value) { const query = new Collection(this.db,this.path); query.filters = [...(this.filters??[]), [key,op,value]]; return query; }
+  async get() {
+    const docs = [...this.db.records].filter(([path,data])=>path.substring(0,path.lastIndexOf("/"))===this.path && (this.filters??[]).every(([key,op,value])=>op === "in" ? value.includes(data[key]) : data[key]===value)).map(([path,data])=>({id:path.split("/").at(-1),exists:true,data:()=>structuredClone(data)}));
+    this.db.queryReads.push({path:this.path,filters:this.filters??[],returned:docs.length});
+    return {docs};
+  }
   get parent() { return new Doc(this.db, this.path.substring(0, this.path.lastIndexOf("/"))); }
 }
 class Doc {
@@ -57,10 +62,7 @@ class TestTransaction {
     assert.equal(this.writes.length, 0, "Firestore reads must precede all writes");
     if (ref instanceof Collection) {
       this.queries.set(ref.path, this.db.epochs.get(ref.path) ?? 0);
-      return { docs: [...this.db.records].filter(([path]) => path.substring(0, path.lastIndexOf("/")) === ref.path).map(([path, data]) => {
-        const id = path.split("/").at(-1);
-        return { id, exists: true, data: () => structuredClone(data) };
-      }) };
+      return ref.get();
     }
     this.reads.set(ref.path, this.db.versions.get(ref.path) ?? 0);
     const data = this.db.records.get(ref.path);
@@ -84,7 +86,7 @@ const server=app.listen(0);await new Promise(r=>server.once("listening",r));afte
 const base=`http://localhost:${server.address().port}`;
 const token=(id="w1",role="WAITER",restaurantId="r")=>jwt.sign({id,role,restaurantId,email:""},"test-secret");
 async function request(path,body,auth=token(),method=body?"POST":"GET"){const response=await fetch(base+path,{method,headers:{"Content-Type":"application/json",Authorization:`Bearer ${auth}`},...(body?{body:JSON.stringify(body)}:{})});return {status:response.status,body:await response.json()};}
-function seed(){store.clear();for(const id of ["w1","w2"])store.set("users/"+id,{name:id,role:"WAITER",restaurantId:"r",isActive:true});store.set("restaurants/r/tables/t",{name:"1",area:"Main",status:"AVAILABLE",currentOrderId:"",restaurantId:"r"});store.set("restaurants/r/items/i",{name:"Tea",price:20,isAvailable:true,categoryId:"c",order:0});store.set("restaurants/r/categories/c",{name:"Drinks",isActive:true,order:0});}
+function seed(){store.clear();db.queryReads=[];for(const id of ["w1","w2"])store.set("users/"+id,{name:id,role:"WAITER",restaurantId:"r",isActive:true});store.set("restaurants/r/tables/t",{name:"1",area:"Main",status:"AVAILABLE",currentOrderId:"",restaurantId:"r"});store.set("restaurants/r/items/i",{name:"Tea",price:20,isAvailable:true,categoryId:"c",order:0});store.set("restaurants/r/categories/c",{name:"Drinks",isActive:true,order:0});}
 const batch=(orderId="")=>({operationId:randomUUID(),tableId:"t",orderId,createdAt:new Date().toISOString(),items:[{menuItemId:"i",quantity:2,notes:"hot"}]});
 test("additions from two waiters, retry after lost response, attribution and sync log",async()=>{seed();const a=batch(),b=batch();const results=await Promise.all([request("/api/waiter/batches",a),request("/api/waiter/batches",b,token("w2"))]);assert.deepEqual(results.map(r=>r.status),[200,200]);const id=results[0].body.data.orderId;assert.equal(results[1].body.data.orderId,id);assert.equal(store.get(`restaurants/r/orders/${id}`).total,80);assert.equal((await request("/api/waiter/batches",a)).status,200);assert.equal(store.get(`restaurants/r/orders/${id}`).total,80);assert.equal(store.get(`restaurants/r/waiterBatches/${b.operationId}`).waiterName,"w2");assert.equal(store.get("restaurants/r/syncMeta/main").cursor,4);assert.equal((await request("/api/waiter/batches",a,token("w2"))).status,409);});
 test("fake prices and actors rejected; closed orders and unavailable items are atomic",async()=>{seed();assert.equal((await request("/api/waiter/batches",{...batch(),waiterId:"w2"})).status,400);const bad=batch();bad.items[0].unitPrice=0;assert.equal((await request("/api/waiter/batches",bad)).status,400);const r=await request("/api/waiter/batches",batch());const id=r.body.data.orderId;store.get(`restaurants/r/orders/${id}`).status="COMPLETED";assert.equal((await request("/api/waiter/batches",batch(id))).status,409);assert.equal(store.get(`restaurants/r/orders/${id}`).total,40);seed();store.get("restaurants/r/items/i").isAvailable=false;assert.equal((await request("/api/waiter/batches",batch())).status,409);assert.equal(store.get("restaurants/r/tables/t").currentOrderId,"");});
@@ -123,4 +125,48 @@ test("general note validation and rejected batches leave all order instructions 
  assert.equal((await request("/api/waiter/batches",rejected)).status,409);
  assert.equal(store.get(`restaurants/r/orders/${id}`).notes,"تعليمات محفوظة");
  assert.equal(store.has(`restaurants/r/waiterBatches/${rejected.operationId}`),false);
+});
+
+
+test("waiter state reads every non-terminal status with a scoped query and never reads history or menu",async()=>{
+ seed();
+ const statuses=["DRAFT","PENDING","CONFIRMED","PREPARING","READY","SERVED"];
+ for(const status of statuses) store.set(`restaurants/r/orders/${status}`,{tableId:"t",status,items:[]});
+ for(let n=0;n<1000;n++) store.set(`restaurants/r/orders/old-${n}`,{tableId:"t",status:n%2?"COMPLETED":"CANCELLED",items:[],total:123});
+ store.set("restaurants/other/orders/foreign",{status:"PENDING",items:[]});
+ store.set("restaurants/r/tables/deleted",{name:"2",deletedAt:"today",status:"AVAILABLE"});
+ store.set("restaurants/r/tables/disabled",{name:"3",status:"DISABLED"});
+ const result=await request("/api/waiter/state");assert.equal(result.status,200);
+ assert.deepEqual(result.body.data.orders.map(o=>o.status).sort(),statuses.sort());
+ assert.deepEqual(result.body.data.tables.map(t=>t.id),["t"]);
+ const query=db.queryReads.find(q=>q.path==="restaurants/r/orders");
+ assert.deepEqual(query.filters,[["status","in",["DRAFT","PENDING","CONFIRMED","PREPARING","READY","SERVED"]]]);
+ assert.equal(query.returned,6);
+ assert.ok(db.queryReads.every(q=>!q.path.endsWith("/items")&&!q.path.endsWith("/categories")));
+ assert.doesNotMatch(JSON.stringify(result.body),/price|total|paidAmount|discount/i);
+ db.queryReads=[];
+ const menu=await request("/api/waiter/menu");assert.equal(menu.status,200);
+ assert.equal(menu.body.data.items[0].name,"Tea");
+ assert.ok(db.queryReads.every(q=>!q.path.endsWith("/orders")&&!q.path.endsWith("/tables")));
+ assert.doesNotMatch(JSON.stringify(menu.body),/price|total|paidAmount|discount/i);
+ assert.equal((await request("/api/waiter/state",undefined,token("w1","WAITER","other"))).status,401);
+ store.get("users/w1").isActive=false;
+ assert.equal((await request("/api/waiter/menu")).status,401);
+});
+
+test("batch confirmation and lost-response retry return current price-free table/order without repeating additions",async()=>{
+ seed();const a=batch();const accepted=await request("/api/waiter/batches",a);
+ const id=accepted.body.data.orderId;
+ assert.equal(accepted.body.data.table.currentOrderId,id);
+ assert.equal(accepted.body.data.order.items[0].quantity,2);
+ assert.doesNotMatch(JSON.stringify(accepted.body),/price|total|paidAmount|discount/i);
+ await request("/api/waiter/batches",batch(id),token("w2"));
+ const replay=await request("/api/waiter/batches",a);
+ assert.equal(replay.body.data.order.items.length,2);
+ assert.equal(store.get(`restaurants/r/orders/${id}`).items.length,2);
+ store.get(`restaurants/r/orders/${id}`).status="COMPLETED";
+ store.get("restaurants/r/tables/t").currentOrderId="";
+ const closedReplay=await request("/api/waiter/batches",a);
+ assert.equal(closedReplay.status,200);assert.equal(closedReplay.body.data.order,null);
+ assert.equal(closedReplay.body.data.table.currentOrderId,"");
 });

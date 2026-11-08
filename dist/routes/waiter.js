@@ -9,7 +9,6 @@ import { findRestaurantBySlug } from "../services/restaurants.js";
 import { getTenantContext } from "../services/tenant.js";
 import { assertFeature } from "../services/plans.js";
 import { HttpError, sendJson } from "../utils/http.js";
-import { listTables, listOrders } from "../modules/restaurant-ops/service.js";
 import { recordChanges } from "../modules/sync/change-log.js";
 import { randomUUID, createHash } from "node:crypto";
 const credentials = z.object({ name: z.string().trim().min(1).max(80), username: z.string().trim().toLowerCase().regex(/^[a-z0-9_.-]{3,40}$/), password: z.string().min(8).max(128) }).strict();
@@ -116,11 +115,57 @@ waiterRouter.use(async (req, _res, next) => {
         next(e);
     }
 });
+// All non-terminal statuses in the actual OrderStatus model, including DRAFT.
+const activeStatuses = ["DRAFT", "PENDING", "CONFIRMED", "PREPARING", "READY", "SERVED"];
+const visibleTable = (id, t) => ({
+    id, name: t.name, area: t.area, status: t.status, currentOrderId: t.currentOrderId || ""
+});
+const visibleOrder = (id, o) => ({
+    id, tableId: o.tableId, status: o.status,
+    items: o.items.map(({ menuItemId, name, quantity, notes }) => ({ menuItemId, name, quantity, notes }))
+});
+async function loadMenu(id) {
+    const [items, categories] = await Promise.all([root(id).collection("items").get(), root(id).collection("categories").get()]);
+    return {
+        items: items.docs.map(d => ({ id: d.id, name: d.data().name, categoryId: d.data().categoryId, isAvailable: d.data().isAvailable, order: d.data().order })),
+        categories: categories.docs.filter(d => d.data().isActive).map(d => ({ id: d.id, name: d.data().name, order: d.data().order }))
+    };
+}
+async function loadState(id) {
+    // One consistent snapshot for table pointers and their active orders. No history scan.
+    return db.runTransaction(async (tx) => {
+        const [tables, orders] = await Promise.all([
+            tx.get(root(id).collection("tables")),
+            tx.get(root(id).collection("orders").where("status", "in", activeStatuses))
+        ]);
+        return {
+            tables: tables.docs.filter(d => !d.data().deletedAt && d.data().status !== "DISABLED").map(d => visibleTable(d.id, d.data())),
+            orders: orders.docs.map(d => visibleOrder(d.id, d.data()))
+        };
+    }, { readOnly: true });
+}
+waiterRouter.get("/menu", async (req, res, next) => {
+    try {
+        sendJson(res, await loadMenu(req.user.restaurantId));
+    }
+    catch (e) {
+        next(e);
+    }
+});
+waiterRouter.get("/state", async (req, res, next) => {
+    try {
+        sendJson(res, await loadState(req.user.restaurantId));
+    }
+    catch (e) {
+        next(e);
+    }
+});
+// Compatibility for previously opened clients; the new client never polls this route.
 waiterRouter.get("/bootstrap", async (req, res, next) => {
     try {
         const id = req.user.restaurantId;
-        const [tables, orders, items, categories] = await Promise.all([listTables(id), listOrders(id), root(id).collection("items").get(), root(id).collection("categories").get()]);
-        sendJson(res, { tables: tables.filter(t => t.status !== "DISABLED").map(t => ({ id: t.id, name: t.name, area: t.area, status: t.status, currentOrderId: t.currentOrderId })), orders: orders.filter(o => !["COMPLETED", "CANCELLED"].includes(o.status)).map(o => ({ id: o.id, tableId: o.tableId, status: o.status, items: o.items.map(i => ({ menuItemId: i.menuItemId, name: i.name, quantity: i.quantity, notes: i.notes })) })), items: items.docs.map(d => ({ id: d.id, name: d.data().name, categoryId: d.data().categoryId, isAvailable: d.data().isAvailable, order: d.data().order })), categories: categories.docs.filter(d => d.data().isActive).map(d => ({ id: d.id, name: d.data().name, order: d.data().order })) });
+        const [state, menu] = await Promise.all([loadState(id), loadMenu(id)]);
+        sendJson(res, { ...state, ...menu });
     }
     catch (e) {
         next(e);
@@ -138,7 +183,18 @@ waiterRouter.post("/batches", async (req, res, next) => {
                 const b = prior.data();
                 if (b.waiterId !== req.user.id || b.fingerprint !== JSON.stringify(input))
                     throw new HttpError(409, "تعارض معرف العملية");
-                return { orderId: b.orderId };
+                // A lost reply may be retried after another waiter added lines or the order closed.
+                // These two targeted reads return current confirmation without replaying the batch.
+                const [tableSnapshot, orderSnapshot] = await Promise.all([
+                    tx.get(parent.collection("tables").doc(input.tableId)),
+                    tx.get(parent.collection("orders").doc(b.orderId))
+                ]);
+                const table = tableSnapshot.data(), order = orderSnapshot.data();
+                return {
+                    orderId: b.orderId,
+                    table: table && !table.deletedAt && table.status !== "DISABLED" ? visibleTable(input.tableId, table) : null,
+                    order: order && table?.currentOrderId === b.orderId && activeStatuses.includes(order.status) ? visibleOrder(b.orderId, order) : null
+                };
             }
             const activeUser = await tx.get(db.collection("users").doc(req.user.id));
             if (!activeUser.data()?.isActive || activeUser.data()?.restaurantId !== restaurantId || activeUser.data()?.role !== "WAITER")
@@ -173,7 +229,7 @@ waiterRouter.post("/batches", async (req, res, next) => {
             tx.set(orderRef, updated);
             tx.update(tableRef, nextTable);
             tx.create(batchRef, { ...input, orderId, waiterId: req.user.id, waiterName: activeUser.data().name, acceptedAt: now, fingerprint: JSON.stringify(input), items: lines.map(({ menuItemId, name, quantity, notes }) => ({ menuItemId, name, quantity, notes })) });
-            return { orderId };
+            return { orderId, table: visibleTable(input.tableId, nextTable), order: visibleOrder(orderId, updated) };
         });
         sendJson(res, result);
     }
