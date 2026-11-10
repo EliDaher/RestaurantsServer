@@ -1,3 +1,4 @@
+import { isResourceExhausted, quotaError } from "../utils/firestore-errors.js";
 import { PaymentValidationError } from "../utils/payments.js";
 import type { NextFunction, Request, Response } from "express";
 import { ZodError } from "zod";
@@ -13,6 +14,10 @@ export function errorHandler(
   res: Response,
   _next: NextFunction,
 ) {
+  if (isResourceExhausted(error)) {
+    res.setHeader("Retry-After", "30");
+    return res.status(503).json({ error: quotaError });
+  }
   if (error instanceof PaymentValidationError)
     return res
       .status(400)

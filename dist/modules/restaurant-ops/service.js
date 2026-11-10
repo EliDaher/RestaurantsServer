@@ -1,3 +1,5 @@
+import { orderRecipes } from "../../utils/recipe-query.js";
+import { runLoggedTransaction } from "../sync/logged-transaction.js";
 import { assertPaymentContext } from "./payment-context.js";
 import { preparePaymentReversals } from "./payment-reversals.js";
 import { prepareExpenseArtifacts } from "./expense-artifacts.js";
@@ -44,7 +46,7 @@ export function listInventoryTransactions(restaurantId) {
 export async function adjustInventory(restaurantId, input, createdById) {
     const itemRef = scopedDoc(restaurantId, "inventoryItems", input.inventoryItemId);
     const transactionRef = scopedCollection(restaurantId, "inventoryTransactions").doc();
-    await db.runTransaction(async (transaction) => {
+    await runLoggedTransaction(db, async (transaction) => {
         const snapshot = await transaction.get(itemRef);
         if (!snapshot.exists) {
             throw new HttpError(404, "Inventory item not found");
@@ -82,7 +84,7 @@ export async function saveMenuItemRecipe(restaurantId, menuItemId, ingredients) 
     const menuItemRef = db.collection("restaurants").doc(restaurantId).collection("items").doc(menuItemId);
     const existingRecipeQuery = scopedCollection(restaurantId, "recipeIngredients").where("menuItemId", "==", menuItemId);
     const uniqueInventoryIds = [...new Set(ingredients.map((ingredient) => ingredient.inventoryItemId))];
-    await db.runTransaction(async (transaction) => {
+    await runLoggedTransaction(db, async (transaction) => {
         const menuItemSnapshot = await transaction.get(menuItemRef);
         if (!menuItemSnapshot.exists) {
             throw new HttpError(404, "Menu item not found");
@@ -146,7 +148,7 @@ export async function createOrder(restaurantId, input, createdById, restaurant, 
     const orderedAt = input.orderedAt || new Date().toISOString();
     const ref = options.orderId ? scopedCollection(restaurantId, "orders").doc(options.orderId) : scopedCollection(restaurantId, "orders").doc();
     const version = Date.now();
-    await db.runTransaction(async (transaction) => {
+    await runLoggedTransaction(db, async (transaction) => {
         const existingOrder = await transaction.get(ref);
         if (existingOrder.exists)
             return;
@@ -214,7 +216,7 @@ export async function updateOrder(restaurantId, orderId, input) {
         input.serviceCharge !== undefined ||
         input.paymentMethod !== undefined;
     const items = input.items ? await hydrateOrderItems(restaurantId, input.items) : null;
-    await db.runTransaction(async (transaction) => {
+    await runLoggedTransaction(db, async (transaction) => {
         const snapshot = await transaction.get(orderRef);
         if (!snapshot.exists) {
             throw new HttpError(404, "Order not found");
@@ -289,7 +291,7 @@ export async function cancelOrder(restaurantId, orderId, createdById, reason) {
     const reverseJournalRef = scopedDoc(restaurantId, "journalEntries", `reverse_order_${orderId}`);
     const originalCashMovementRef = scopedDoc(restaurantId, "cashMovements", `order_${orderId}`);
     const reverseCashMovementRef = scopedDoc(restaurantId, "cashMovements", `cancel_order_${orderId}`);
-    await db.runTransaction(async (transaction) => {
+    await runLoggedTransaction(db, async (transaction) => {
         const orderSnapshot = await transaction.get(orderRef);
         if (!orderSnapshot.exists) {
             throw new HttpError(404, "Order not found");
@@ -377,7 +379,7 @@ export async function completeOrder(restaurantId, orderId, input, createdById) {
     const paymentRef = scopedDoc(restaurantId, "payments", `order_${orderId}`);
     const cashMovementRef = scopedDoc(restaurantId, "cashMovements", `order_${orderId}`);
     const journalEntryRef = scopedDoc(restaurantId, "journalEntries", `order_${orderId}`);
-    await db.runTransaction(async (transaction) => {
+    await runLoggedTransaction(db, async (transaction) => {
         const orderSnapshot = await transaction.get(orderRef);
         if (!orderSnapshot.exists) {
             throw new HttpError(404, "Order not found");
@@ -524,7 +526,7 @@ export async function createInvoice(restaurantId, input, createdById) {
         throw new HttpError(400, "المدفوع أكبر من إجمالي الفاتورة.");
     const remainingAmount = total - paidAmount;
     const invoiceRef = scopedCollection(restaurantId, "invoices").doc(randomUUID());
-    await db.runTransaction(async (tx) => {
+    await runLoggedTransaction(db, async (tx) => {
         const restaurantSnap = await tx.get(db.collection("restaurants").doc(restaurantId));
         const restaurant = restaurantSnap.data();
         if (settlement && restaurant.currency !== "SYP")
@@ -598,7 +600,7 @@ export async function updateInvoice(restaurantId, invoiceId, input) {
     });
 }
 export async function deleteInvoice(restaurantId, invoiceId) {
-    await db.runTransaction(async (tx) => {
+    await runLoggedTransaction(db, async (tx) => {
         const ref = scopedDoc(restaurantId, "invoices", invoiceId);
         const snapshot = await tx.get(ref);
         if (!snapshot.exists)
@@ -643,7 +645,7 @@ export function getExpense(restaurantId, expenseId) {
 export async function createExpense(restaurantId, input, createdById) {
     input = normalizeMoney(input);
     const ref = scopedCollection(restaurantId, "expenses").doc(randomUUID());
-    await db.runTransaction(async (tx) => {
+    await runLoggedTransaction(db, async (tx) => {
         const now = new Date().toISOString();
         const artifacts = await prepareExpenseArtifacts(tx, restaurantId, ref.id, input, createdById, now);
         tx.set(ref, { ...input, ...artifacts.metadata, restaurantId, createdById, paidAt: input.paidAt ?? now, createdAt: now, updatedAt: now });
@@ -664,7 +666,7 @@ export async function updateExpense(restaurantId, expenseId, input) {
     return updateScoped(restaurantId, "expenses", expenseId, input);
 }
 export async function deleteExpense(restaurantId, expenseId) {
-    await db.runTransaction(async (tx) => {
+    await runLoggedTransaction(db, async (tx) => {
         const ref = scopedDoc(restaurantId, "expenses", expenseId);
         const expenseSnap = await tx.get(ref);
         if (!expenseSnap.exists)
@@ -723,7 +725,7 @@ export function getCashMovement(restaurantId, cashMovementId) {
 export async function createCashMovement(restaurantId, input, createdById) {
     input = normalizeMoney(input);
     const ref = scopedCollection(restaurantId, "cashMovements").doc(randomUUID());
-    await db.runTransaction(async (tx) => {
+    await runLoggedTransaction(db, async (tx) => {
         await assertPaymentContext(tx, restaurantId, input);
         const registerRef = input.cashRegisterId ? scopedDoc(restaurantId, "cashRegisters", input.cashRegisterId) : null;
         const register = registerRef ? await tx.get(registerRef) : null;
@@ -804,8 +806,9 @@ export async function getReportsSummary(restaurantId, from, to) {
 }
 async function hydrateOrderItems(restaurantId, lines) {
     const items = [];
+    const snapshots = new Map(await Promise.all([...new Set(lines.map(line => line.menuItemId))].map(async (id) => [id, await db.collection("restaurants").doc(restaurantId).collection("items").doc(id).get()])));
     for (const line of lines) {
-        const itemSnapshot = await db.collection("restaurants").doc(restaurantId).collection("items").doc(line.menuItemId).get();
+        const itemSnapshot = snapshots.get(line.menuItemId);
         if (!itemSnapshot.exists) {
             throw new HttpError(404, `Menu item not found: ${line.menuItemId}`);
         }
@@ -827,7 +830,7 @@ async function hydrateOrderItems(restaurantId, lines) {
 async function deductRecipeInventory(transaction, restaurantId, order, createdById) {
     if (order.inventoryDeductedAt)
         return;
-    const recipeSnapshot = await transaction.get(scopedCollection(restaurantId, "recipeIngredients"));
+    const recipeSnapshot = await orderRecipes(transaction, scopedCollection(restaurantId, "recipeIngredients"), order.items);
     const recipeIngredients = recipeSnapshot.docs.map((doc) => doc.data());
     const deductions = new Map();
     for (const line of order.items) {
@@ -888,7 +891,7 @@ function buildReverseSaleJournalLines(paidAmount, remainingAmount, total) {
     return lines;
 }
 async function restoreRecipeInventory(transaction, restaurantId, order, createdById, reason) {
-    const recipeSnapshot = await transaction.get(scopedCollection(restaurantId, "recipeIngredients"));
+    const recipeSnapshot = await orderRecipes(transaction, scopedCollection(restaurantId, "recipeIngredients"), order.items);
     const recipeIngredients = recipeSnapshot.docs.map((doc) => doc.data());
     const restorations = new Map();
     for (const line of order.items) {
@@ -976,33 +979,31 @@ async function getScoped(restaurantId, collectionName, id) {
 }
 async function createScoped(restaurantId, collectionName, input) {
     const ref = scopedCollection(restaurantId, collectionName).doc(randomUUID());
-    await ref.set({
-        ...input,
-        restaurantId,
-        createdAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp()
+    await runLoggedTransaction(db, async (tx) => {
+        tx.set(ref, {
+            ...input,
+            restaurantId,
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp()
+        });
     });
     return { id: ref.id };
 }
 async function updateScoped(restaurantId, collectionName, id, input) {
     const ref = scopedDoc(restaurantId, collectionName, id);
-    const snapshot = await ref.get();
-    if (!snapshot.exists) {
-        throw new HttpError(404, "Record not found");
-    }
-    await ref.update({
-        ...input,
-        restaurantId,
-        updatedAt: FieldValue.serverTimestamp()
+    await runLoggedTransaction(db, async (tx) => {
+        if (!(await tx.get(ref)).exists)
+            throw new HttpError(404, "Record not found");
+        tx.update(ref, { ...input, restaurantId, updatedAt: FieldValue.serverTimestamp() });
     });
 }
 async function deleteScoped(restaurantId, collectionName, id) {
     const ref = scopedDoc(restaurantId, collectionName, id);
-    const snapshot = await ref.get();
-    if (!snapshot.exists) {
-        throw new HttpError(404, "Record not found");
-    }
-    await ref.delete();
+    await runLoggedTransaction(db, async (tx) => {
+        if (!(await tx.get(ref)).exists)
+            throw new HttpError(404, "Record not found");
+        tx.delete(ref);
+    });
 }
 function scopedCollection(restaurantId, collectionName) {
     return db.collection("restaurants").doc(restaurantId).collection(collectionName);

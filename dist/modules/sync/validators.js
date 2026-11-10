@@ -31,7 +31,8 @@ export const syncPushSchema = z.object({
     })).max(50)
 });
 export const syncPullQuerySchema = z.object({
-    cursor: z.coerce.number().int().min(0).default(0)
+    cursor: z.coerce.number().int().min(0).default(0),
+    throughCursor: z.coerce.number().int().min(0).optional()
 });
 export const tableSyncPayloadSchema = z.object({
     name: z.string().trim().min(1),

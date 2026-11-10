@@ -1,3 +1,4 @@
+import { measuredSnapshot } from "./read-metrics.js";
 import type { DocumentData, DocumentSnapshot, Timestamp } from "firebase-admin/firestore";
 
 function toIso(value: unknown): unknown {
@@ -8,6 +9,7 @@ function toIso(value: unknown): unknown {
 }
 
 export function withId<T>(doc: DocumentSnapshot<DocumentData>): T {
+  measuredSnapshot(doc);
   const data = doc.data();
   return Object.fromEntries(
     Object.entries({ id: doc.id, ...data }).map(([key, value]) => [key, toIso(value)])

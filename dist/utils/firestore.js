@@ -1,3 +1,4 @@
+import { measuredSnapshot } from "./read-metrics.js";
 function toIso(value) {
     if (value && typeof value === "object" && "toDate" in value) {
         return value.toDate().toISOString();
@@ -5,6 +6,7 @@ function toIso(value) {
     return value;
 }
 export function withId(doc) {
+    measuredSnapshot(doc);
     const data = doc.data();
     return Object.fromEntries(Object.entries({ id: doc.id, ...data }).map(([key, value]) => [key, toIso(value)]));
 }

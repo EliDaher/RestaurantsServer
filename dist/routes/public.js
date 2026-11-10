@@ -1,34 +1,23 @@
 import { Router } from "express";
-import { findRestaurantByDomain, findRestaurantBySlug, listCategories, listItems } from "../services/restaurants.js";
+import { getPublicMenu, getPublicRestaurant } from "../services/public-menu.js";
 import { HttpError, sendJson } from "../utils/http.js";
 export const publicRouter = Router();
+// No browser/CDN cache: the server owns the entire 15-second freshness budget.
+publicRouter.use((_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 publicRouter.get("/restaurants/by-domain", async (req, res, next) => {
     try {
         const host = String(req.query.host ?? "").split(":")[0];
-        if (!host) {
+        if (!host)
             throw new HttpError(400, "Host is required");
-        }
-        const restaurant = await findRestaurantByDomain(host, true);
-        if (!restaurant) {
-            throw new HttpError(404, "No active restaurant is linked to this domain");
-        }
-        const [categories, items] = await Promise.all([
-            listCategories(restaurant.id, true),
-            listItems(restaurant.id, true)
-        ]);
-        sendJson(res, { restaurant, menu: { restaurantId: restaurant.id, categories, items } });
+        sendJson(res, await getPublicMenu(host, true));
     }
     catch (error) {
         next(error);
     }
 });
-publicRouter.get("/restaurants/:slug", async (req, res, next) => {
+publicRouter.get("/restaurants/:slug/bundle", async (req, res, next) => {
     try {
-        const restaurant = await findRestaurantBySlug(req.params.slug, true);
-        if (!restaurant) {
-            throw new HttpError(404, "Menu is not available right now");
-        }
-        sendJson(res, restaurant);
+        sendJson(res, await getPublicMenu(req.params.slug));
     }
     catch (error) {
         next(error);
@@ -36,15 +25,15 @@ publicRouter.get("/restaurants/:slug", async (req, res, next) => {
 });
 publicRouter.get("/restaurants/:slug/menu", async (req, res, next) => {
     try {
-        const restaurant = await findRestaurantBySlug(req.params.slug, true);
-        if (!restaurant) {
-            throw new HttpError(404, "Menu is not available right now");
-        }
-        const [categories, items] = await Promise.all([
-            listCategories(restaurant.id, true),
-            listItems(restaurant.id, true)
-        ]);
-        sendJson(res, { restaurantId: restaurant.id, categories, items });
+        sendJson(res, (await getPublicMenu(req.params.slug)).menu);
+    }
+    catch (error) {
+        next(error);
+    }
+});
+publicRouter.get("/restaurants/:slug", async (req, res, next) => {
+    try {
+        sendJson(res, await getPublicRestaurant(req.params.slug));
     }
     catch (error) {
         next(error);

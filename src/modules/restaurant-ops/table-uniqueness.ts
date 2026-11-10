@@ -1,3 +1,4 @@
+import { runLoggedTransaction } from "../sync/logged-transaction.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { DocumentReference, Firestore, Transaction } from "firebase-admin/firestore";
 import { HttpError } from "../../utils/http.js";
@@ -32,11 +33,12 @@ export async function prepareTableNameReservation(
   if (nextRef && nextKey !== undefined) {
     // Legacy records do not have reservations. Scan them in the SAME transaction;
     // the shared reservation document arbitrates all concurrent writers.
-    const tables = await transaction.get(restaurantRef.collection("tables"));
-    const duplicate = tables.docs.some((snapshot) => {
+    const readiness = await transaction.get(restaurantRef.collection("optimizationMeta").doc("main"));
+    const tables = readiness.data()?.tableReservationsReady === true ? null : await transaction.get(restaurantRef.collection("tables"));
+    const duplicate = tables?.docs.some((snapshot) => {
       const table = snapshot.data();
       return snapshot.id !== tableId && !table.deletedAt && normalizeTableName(String(table.name ?? "")) === nextKey;
-    });
+    }) ?? false;
     const unchangedLegacyDuplicate = duplicate && Boolean(current && !current.deletedAt && oldKey === nextKey);
     const reservedByOther = nextSnapshot?.exists && nextSnapshot.data()?.tableId !== tableId;
     if (!unchangedLegacyDuplicate && (duplicate || reservedByOther)) {
@@ -57,7 +59,7 @@ export async function createTableWithUniqueName(
 ) {
   const restaurantRef = firestore.collection("restaurants").doc(restaurantId);
   const ref = restaurantRef.collection("tables").doc(randomUUID());
-  await firestore.runTransaction(async (transaction) => {
+  await runLoggedTransaction(firestore, async (transaction) => {
     const writeReservation = await prepareTableNameReservation(transaction, restaurantRef, ref.id, null, String(input.name ?? ""));
     writeReservation(transaction);
     transaction.create(ref, { ...input, name: String(input.name).trim(), restaurantId, createdAt: timestamp, updatedAt: timestamp });
@@ -70,7 +72,7 @@ export async function updateTableWithUniqueName(
 ) {
   const restaurantRef = firestore.collection("restaurants").doc(restaurantId);
   const ref = restaurantRef.collection("tables").doc(tableId);
-  await firestore.runTransaction(async (transaction) => {
+  await runLoggedTransaction(firestore, async (transaction) => {
     const snapshot = await transaction.get(ref);
     const current = snapshot.data() as ExistingTable | undefined;
     if (!current || current.deletedAt) throw new HttpError(404, "Table not found");
@@ -84,7 +86,7 @@ export async function updateTableWithUniqueName(
 export async function deleteTableWithUniqueName(firestore: Firestore, restaurantId: string, tableId: string) {
   const restaurantRef = firestore.collection("restaurants").doc(restaurantId);
   const ref = restaurantRef.collection("tables").doc(tableId);
-  await firestore.runTransaction(async (transaction) => {
+  await runLoggedTransaction(firestore, async (transaction) => {
     const snapshot = await transaction.get(ref);
     if (!snapshot.exists) throw new HttpError(404, "Table not found");
     const writeReservation = await prepareTableNameReservation(transaction, restaurantRef, tableId, snapshot.data() as ExistingTable);

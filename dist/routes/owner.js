@@ -2,7 +2,7 @@ import { Router } from "express";
 import { requireOwner } from "../middleware/auth.js";
 import { restaurantOpsRouter } from "../modules/restaurant-ops/routes.js";
 import { syncRouter } from "../modules/sync/routes.js";
-import { createCategory, createItem, deleteCategory, deleteItem, getRestaurantById, listCategories, listItems, updateCategory, updateItem, updateRestaurant } from "../services/restaurants.js";
+import { createCategory, createItem, deleteCategory, deleteItem, getRestaurantById, getMenuUsage, listCategories, listItems, updateCategory, updateItem, updateRestaurant } from "../services/restaurants.js";
 import { planLimits } from "../services/plans.js";
 import { sendReceiptCutCommand } from "../services/receipt-printer.js";
 import { uploadImageToCloudinary } from "../services/uploads.js";
@@ -58,11 +58,7 @@ ownerRouter.post("/receipt-printer/cut", async (req, res, next) => {
 ownerRouter.get("/subscription", async (req, res, next) => {
     try {
         const restaurantId = getRequiredRestaurantId(req);
-        const [restaurant, categories, items] = await Promise.all([
-            getRestaurantById(restaurantId),
-            listCategories(restaurantId),
-            listItems(restaurantId)
-        ]);
+        const [restaurant, usage] = await Promise.all([getRestaurantById(restaurantId), getMenuUsage(restaurantId)]);
         const limits = planLimits[restaurant.plan ?? "basic"];
         sendJson(res, {
             plan: restaurant.plan,
@@ -71,10 +67,7 @@ ownerRouter.get("/subscription", async (req, res, next) => {
             endsAt: restaurant.subscriptionEndsAt ?? "",
             lastPaymentAt: restaurant.lastPaymentAt ?? "",
             limits,
-            usage: {
-                categories: categories.length,
-                items: items.length
-            },
+            usage,
             customDomain: restaurant.customDomain ?? "",
             customDomainStatus: restaurant.customDomainStatus ?? "none"
         });

@@ -1,3 +1,4 @@
+import { isResourceExhausted, quotaError } from "../utils/firestore-errors.js";
 import { PaymentValidationError } from "../utils/payments.js";
 import { ZodError } from "zod";
 import { HttpError } from "../utils/http.js";
@@ -5,6 +6,10 @@ export function notFound(req, _res, next) {
     next(new HttpError(404, `Route not found: ${req.method} ${req.path}`));
 }
 export function errorHandler(error, _req, res, _next) {
+    if (isResourceExhausted(error)) {
+        res.setHeader("Retry-After", "30");
+        return res.status(503).json({ error: quotaError });
+    }
     if (error instanceof PaymentValidationError)
         return res
             .status(400)

@@ -1,3 +1,6 @@
+import { orderRecipes } from "../../utils/recipe-query.js";
+import { isResourceExhausted, quotaError } from "../../utils/firestore-errors.js";
+import { runLoggedTransaction } from "./logged-transaction.js";
 import { assertPaymentContext } from "../restaurant-ops/payment-context.js";
 import { preparePaymentReversals } from "../restaurant-ops/payment-reversals.js";
 import { prepareExpenseArtifacts } from "../restaurant-ops/expense-artifacts.js";
@@ -13,8 +16,8 @@ import { currentOrderVersion, nextOrderVersion, orderVersionConflict } from "./o
 import { assertSameOperationRecord } from "./operation-record.js";
 import { prepareTableNameReservation } from "../restaurant-ops/table-uniqueness.js";
 import { tableSyncPayloadSchema } from "./validators.js";
-export function pullChanges(restaurantId, cursor) {
-    return listChanges(restaurantId, cursor);
+export function pullChanges(restaurantId, cursor, throughCursor) {
+    return listChanges(restaurantId, cursor, throughCursor);
 }
 export async function pushOperations(restaurantId, user, deviceId, operations) {
     const results = [];
@@ -23,7 +26,13 @@ export async function pushOperations(restaurantId, user, deviceId, operations) {
             results.push(await applyOperation(restaurantId, user, deviceId, operation));
         }
         catch (error) {
-            results.push(errorResult(operation, error));
+            const result = errorResult(operation, error);
+            results.push(result);
+            if (isResourceExhausted(error)) {
+                for (const remaining of operations.slice(results.length))
+                    results.push(errorResult(remaining, error));
+                break;
+            }
         }
     }
     return { results };
@@ -68,7 +77,7 @@ async function applyExpenseOperation(restaurantId, user, deviceId, operation) {
     const globalOpRef = globalOperationRef(operation.operationId);
     const hash = payloadHash(operation);
     const userId = user.id ?? user.email;
-    return db.runTransaction(async (transaction) => {
+    return runLoggedTransaction(db, async (transaction) => {
         const [operationSnapshot, globalOperationSnapshot] = await Promise.all([
             transaction.get(opRef),
             transaction.get(globalOpRef)
@@ -133,7 +142,7 @@ async function applyCashMovementOperation(restaurantId, user, deviceId, operatio
     const globalOpRef = globalOperationRef(operation.operationId);
     const hash = payloadHash(operation);
     const userId = user.id ?? user.email;
-    return db.runTransaction(async (transaction) => {
+    return runLoggedTransaction(db, async (transaction) => {
         const [operationSnapshot, globalOperationSnapshot] = await Promise.all([
             transaction.get(opRef),
             transaction.get(globalOpRef)
@@ -194,7 +203,7 @@ async function applyOrderOperation(restaurantId, user, deviceId, operation) {
     const globalOpRef = globalOperationRef(operation.operationId);
     const hash = payloadHash(operation);
     const userId = user.id ?? user.email;
-    return db.runTransaction(async (transaction) => {
+    return runLoggedTransaction(db, async (transaction) => {
         const [operationSnapshot, globalOperationSnapshot] = await Promise.all([
             transaction.get(opRef),
             transaction.get(globalOpRef)
@@ -815,7 +824,7 @@ async function applyTableOperation(restaurantId, user, deviceId, operation) {
     const opRef = operationRef(restaurantId, operation.operationId);
     const tableRef = db.collection("restaurants").doc(restaurantId).collection("tables").doc(operation.entityId);
     const hash = payloadHash(operation);
-    return db.runTransaction(async (transaction) => {
+    return runLoggedTransaction(db, async (transaction) => {
         const [operationSnapshot, tableSnapshot] = await Promise.all([
             transaction.get(opRef),
             transaction.get(tableRef)
@@ -996,7 +1005,8 @@ async function existingOrderChanges(transaction, restaurantId, order) {
     return changes;
 }
 async function hydrateOrderItems(transaction, restaurantId, lines) {
-    const snapshots = await Promise.all(lines.map((line) => transaction.get(scopedDoc(restaurantId, "items", line.menuItemId))));
+    const distinct = new Map(await Promise.all([...new Set(lines.map(line => line.menuItemId))].map(async (id) => [id, await transaction.get(scopedDoc(restaurantId, "items", id))])));
+    const snapshots = lines.map(line => distinct.get(line.menuItemId));
     return lines.map((line, index) => {
         const itemSnapshot = snapshots[index];
         if (!itemSnapshot.exists) {
@@ -1076,7 +1086,7 @@ function emptyInventoryMutation() {
     return { changes: [], write: () => undefined };
 }
 async function inventoryQuantitiesForOrder(transaction, restaurantId, order) {
-    const recipeSnapshot = await transaction.get(scopedCollection(restaurantId, "recipeIngredients"));
+    const recipeSnapshot = await orderRecipes(transaction, scopedCollection(restaurantId, "recipeIngredients"), order.items);
     const recipeIngredients = recipeSnapshot.docs.map((doc) => doc.data());
     const quantities = new Map();
     for (const line of order.items) {
@@ -1352,6 +1362,8 @@ function conflict(operation, code, message) {
     };
 }
 function errorResult(operation, error) {
+    if (isResourceExhausted(error))
+        return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: quotaError };
     if (error instanceof PaymentValidationError)
         return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: { code: "validation_error", message: error.message, retryable: false } };
     if (error instanceof ZodError) {

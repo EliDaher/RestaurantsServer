@@ -1,3 +1,5 @@
+import { waiterHistory, waiterHistoryCache } from "../services/waiter-history.js";
+import { runLoggedTransaction } from "../modules/sync/logged-transaction.js";
 import { Router } from "express";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
@@ -42,7 +44,7 @@ ownerWaitersRouter.post("/", async (req, res, next) => {
         const input = credentials.parse(req.body);
         const id = accountId(req.user.restaurantId, input.username);
         const passwordHash = await hashPassword(input.password);
-        await db.runTransaction(async (tx) => {
+        await runLoggedTransaction(db, async (tx) => {
             const ref = db.collection("users").doc(id);
             if ((await tx.get(ref)).exists)
                 throw new HttpError(409, "اسم المستخدم مستخدم بالفعل");
@@ -58,7 +60,7 @@ ownerWaitersRouter.patch("/:id", async (req, res, next) => {
     try {
         const input = z.object({ name: z.string().trim().min(1).max(80).optional(), password: z.string().min(8).max(128).optional(), isActive: z.boolean().optional() }).strict().parse(req.body);
         const passwordHash = input.password ? await hashPassword(input.password) : undefined;
-        await db.runTransaction(async (tx) => {
+        await runLoggedTransaction(db, async (tx) => {
             const ref = db.collection("users").doc(req.params.id);
             const user = (await tx.get(ref)).data();
             if (!user || user.role !== "WAITER" || user.restaurantId !== req.user.restaurantId)
@@ -74,11 +76,16 @@ ownerWaitersRouter.patch("/:id", async (req, res, next) => {
 });
 ownerWaitersRouter.get("/orders/:orderId/batches", async (req, res, next) => {
     try {
-        const snap = await root(req.user.restaurantId).collection("waiterBatches").where("orderId", "==", req.params.orderId).get();
-        sendJson(res, snap.docs.map(d => d.data()).sort((a, b) => String(a.acceptedAt).localeCompare(String(b.acceptedAt))));
+        if (req.query.incremental !== "1") {
+            // Keep the complete array contract for previously opened owner clients.
+            const snap = await root(req.user.restaurantId).collection("waiterBatches").where("orderId", "==", req.params.orderId).get();
+            return sendJson(res, snap.docs.map(d => d.data()).sort((a, b) => String(a.acceptedAt).localeCompare(String(b.acceptedAt))));
+        }
+        const after = z.coerce.number().int().min(0).default(0).parse(req.query.after);
+        sendJson(res, await waiterHistory(req.user.restaurantId, req.params.orderId, after));
     }
-    catch (e) {
-        next(e);
+    catch (error) {
+        next(error);
     }
 });
 waiterRouter.post("/login", async (req, res, next) => {
@@ -175,7 +182,7 @@ waiterRouter.post("/batches", async (req, res, next) => {
     try {
         const input = batchSchema.parse(req.body);
         const { restaurant, restaurantId } = await getTenantContext(req);
-        const result = await db.runTransaction(async (tx) => {
+        const result = await runLoggedTransaction(db, async (tx) => {
             const parent = root(restaurantId);
             const batchRef = parent.collection("waiterBatches").doc(input.operationId);
             const prior = await tx.get(batchRef);
@@ -210,7 +217,8 @@ waiterRouter.post("/batches", async (req, res, next) => {
             const order = (await tx.get(orderRef)).data();
             if ((input.orderId && !order) || (order && (["COMPLETED", "CANCELLED"].includes(order.status) || order.invoiceId || order.paymentId || order.tableId !== input.tableId)))
                 throw new HttpError(409, "الطلب مغلق أو غير قابل للإضافة");
-            const snapshots = await Promise.all(input.items.map(i => tx.get(parent.collection("items").doc(i.menuItemId))));
+            const distinctItems = new Map(await Promise.all([...new Set(input.items.map(i => i.menuItemId))].map(async (id) => [id, await tx.get(parent.collection("items").doc(id))])));
+            const snapshots = input.items.map(i => distinctItems.get(i.menuItemId));
             const lines = input.items.map((i, index) => {
                 const item = snapshots[index].data();
                 if (!item || !item.isAvailable || !Number.isFinite(item.price) || item.price < 0)
@@ -223,14 +231,20 @@ waiterRouter.post("/batches", async (req, res, next) => {
             const version = Math.max(Date.now(), Number(order?.version ?? 0) + 1);
             const orderNote = input.orderNote?.trim();
             const notes = orderNote ? [order?.notes, `${activeUser.data().name}: ${orderNote}`].filter(Boolean).join("\n") : order?.notes || "";
-            const updated = { ...(order ?? {}), currency: order?.currency || restaurant.currency || "SYP", restaurantId, name: order?.name || `طاولة ${table.name}`, tableId: input.tableId, type: order?.type || "DINE_IN", source: order?.source || "WAITER", status: order?.status || "PENDING", items, subTotal, discount: order?.discount ?? 0, tax: order?.tax ?? 0, serviceCharge: order?.serviceCharge ?? 0, total: Math.max(0, subTotal - (order?.discount ?? 0) + (order?.tax ?? 0) + (order?.serviceCharge ?? 0)), paidAmount: order?.paidAmount ?? 0, paymentStatus: order?.paymentStatus || "UNPAID", paymentMethod: order?.paymentMethod || "CASH", notes, createdById: order?.createdById || req.user.id, closedById: "", invoiceId: "", paymentId: "", inventoryDeductedAt: "", completedAt: "", cancelledAt: "", orderedAt: order?.orderedAt || now, createdAt: order?.createdAt || now, updatedAt: now, version };
+            const historyState = order;
+            const firstHistory = order && historyState?.waiterBatchCursor === undefined
+                ? await tx.get(parent.collection("waiterBatches").where("orderId", "==", orderId).limit(1)) : undefined;
+            const sequenceReady = !order || historyState?.waiterBatchSequenceReady === true || firstHistory?.empty === true;
+            const batchCursor = (historyState?.waiterBatchCursor ?? 0) + 1;
+            const updated = { ...(order ?? {}), waiterBatchCursor: batchCursor, waiterBatchSequenceReady: sequenceReady, currency: order?.currency || restaurant.currency || "SYP", restaurantId, name: order?.name || `طاولة ${table.name}`, tableId: input.tableId, type: order?.type || "DINE_IN", source: order?.source || "WAITER", status: order?.status || "PENDING", items, subTotal, discount: order?.discount ?? 0, tax: order?.tax ?? 0, serviceCharge: order?.serviceCharge ?? 0, total: Math.max(0, subTotal - (order?.discount ?? 0) + (order?.tax ?? 0) + (order?.serviceCharge ?? 0)), paidAmount: order?.paidAmount ?? 0, paymentStatus: order?.paymentStatus || "UNPAID", paymentMethod: order?.paymentMethod || "CASH", notes, createdById: order?.createdById || req.user.id, closedById: "", invoiceId: "", paymentId: "", inventoryDeductedAt: "", completedAt: "", cancelledAt: "", orderedAt: order?.orderedAt || now, createdAt: order?.createdAt || now, updatedAt: now, version };
             const nextTable = { ...table, version, status: "OCCUPIED", currentOrderId: orderId, updatedAt: now };
             await recordChanges(tx, restaurantId, [{ entityType: "order", entityId: orderId, action: "upsert", version, data: { ...updated, id: orderId } }, { entityType: "table", entityId: input.tableId, action: "upsert", version, data: { ...nextTable, id: input.tableId } }]);
             tx.set(orderRef, updated);
             tx.update(tableRef, nextTable);
-            tx.create(batchRef, { ...input, orderId, waiterId: req.user.id, waiterName: activeUser.data().name, acceptedAt: now, fingerprint: JSON.stringify(input), items: lines.map(({ menuItemId, name, quantity, notes }) => ({ menuItemId, name, quantity, notes })) });
+            tx.create(batchRef, { ...input, batchCursor, orderId, waiterId: req.user.id, waiterName: activeUser.data().name, acceptedAt: now, fingerprint: JSON.stringify(input), items: lines.map(({ menuItemId, name, quantity, notes }) => ({ menuItemId, name, quantity, notes })) });
             return { orderId, table: visibleTable(input.tableId, nextTable), order: visibleOrder(orderId, updated) };
         });
+        waiterHistoryCache.clear();
         sendJson(res, result);
     }
     catch (e) {

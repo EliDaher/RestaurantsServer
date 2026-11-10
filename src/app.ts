@@ -1,3 +1,5 @@
+import { readMetrics } from "./utils/read-metrics.js";
+import { requestContext } from "./utils/request-context.js";
 import { waiterRouter, ownerWaitersRouter } from "./routes/waiter.js";
 import cors from "cors";
 import express from "express";
@@ -13,6 +15,8 @@ import { errorHandler, notFound } from "./middleware/error.js";
 export function createApp() {
   const app = express();
 
+  app.use(requestContext);
+  app.use(readMetrics);
   app.use(helmet());
   app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
   app.use(express.json({ limit: "10mb" }));

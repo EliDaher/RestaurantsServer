@@ -1,3 +1,6 @@
+import { orderRecipes } from "../../utils/recipe-query.js";
+import { isResourceExhausted, quotaError } from "../../utils/firestore-errors.js";
+import { runLoggedTransaction } from "./logged-transaction.js";
 import { assertPaymentContext } from "../restaurant-ops/payment-context.js";
 import { preparePaymentReversals } from "../restaurant-ops/payment-reversals.js";
 import { prepareExpenseArtifacts } from "../restaurant-ops/expense-artifacts.js";
@@ -31,8 +34,8 @@ import type { SyncEntityType, SyncPushOperation, SyncPushResult } from "./types.
 import { prepareTableNameReservation } from "../restaurant-ops/table-uniqueness.js";
 import { tableSyncPayloadSchema } from "./validators.js";
 
-export function pullChanges(restaurantId: string, cursor: number) {
-  return listChanges(restaurantId, cursor);
+export function pullChanges(restaurantId: string, cursor: number, throughCursor?: number) {
+  return listChanges(restaurantId, cursor, throughCursor);
 }
 
 export async function pushOperations(restaurantId: string, user: AuthUser, deviceId: string, operations: SyncPushOperation[]) {
@@ -42,7 +45,12 @@ export async function pushOperations(restaurantId: string, user: AuthUser, devic
     try {
       results.push(await applyOperation(restaurantId, user, deviceId, operation));
     } catch (error) {
-      results.push(errorResult(operation, error));
+      const result = errorResult(operation, error);
+      results.push(result);
+      if (isResourceExhausted(error)) {
+        for (const remaining of operations.slice(results.length)) results.push(errorResult(remaining, error));
+        break;
+      }
     }
   }
 
@@ -97,7 +105,7 @@ async function applyExpenseOperation(restaurantId: string, user: AuthUser, devic
   const hash = payloadHash(operation);
   const userId = user.id ?? user.email;
 
-  return db.runTransaction(async (transaction) => {
+  return runLoggedTransaction(db, async (transaction) => {
     const [operationSnapshot, globalOperationSnapshot] = await Promise.all([
       transaction.get(opRef),
       transaction.get(globalOpRef)
@@ -170,7 +178,7 @@ async function applyCashMovementOperation(restaurantId: string, user: AuthUser, 
   const hash = payloadHash(operation);
   const userId = user.id ?? user.email;
 
-  return db.runTransaction(async (transaction) => {
+  return runLoggedTransaction(db, async (transaction) => {
     const [operationSnapshot, globalOperationSnapshot] = await Promise.all([
       transaction.get(opRef),
       transaction.get(globalOpRef)
@@ -238,7 +246,7 @@ async function applyOrderOperation(restaurantId: string, user: AuthUser, deviceI
   const hash = payloadHash(operation);
   const userId = user.id ?? user.email;
 
-  return db.runTransaction(async (transaction) => {
+  return runLoggedTransaction(db, async (transaction) => {
     const [operationSnapshot, globalOperationSnapshot] = await Promise.all([
       transaction.get(opRef),
       transaction.get(globalOpRef)
@@ -939,7 +947,7 @@ async function applyTableOperation(restaurantId: string, user: AuthUser, deviceI
   const tableRef = db.collection("restaurants").doc(restaurantId).collection("tables").doc(operation.entityId);
   const hash = payloadHash(operation);
 
-  return db.runTransaction(async (transaction) => {
+  return runLoggedTransaction(db, async (transaction) => {
     const [operationSnapshot, tableSnapshot] = await Promise.all([
       transaction.get(opRef),
       transaction.get(tableRef)
@@ -1187,9 +1195,8 @@ async function existingOrderChanges(transaction: FirebaseFirestore.Transaction, 
 }
 
 async function hydrateOrderItems(transaction: FirebaseFirestore.Transaction, restaurantId: string, lines: OrderCreateInput["items"]) {
-  const snapshots = await Promise.all(
-    lines.map((line) => transaction.get(scopedDoc(restaurantId, "items", line.menuItemId)))
-  );
+  const distinct = new Map(await Promise.all([...new Set(lines.map(line => line.menuItemId))].map(async id => [id, await transaction.get(scopedDoc(restaurantId, "items", id))] as const)));
+  const snapshots = lines.map(line => distinct.get(line.menuItemId)!);
 
   return lines.map((line, index): OrderLine => {
     const itemSnapshot = snapshots[index];
@@ -1327,7 +1334,7 @@ function emptyInventoryMutation(): InventoryMutation {
 }
 
 async function inventoryQuantitiesForOrder(transaction: FirebaseFirestore.Transaction, restaurantId: string, order: Order) {
-  const recipeSnapshot = await transaction.get(scopedCollection(restaurantId, "recipeIngredients"));
+  const recipeSnapshot = await orderRecipes(transaction, scopedCollection(restaurantId, "recipeIngredients"), order.items);
   const recipeIngredients = recipeSnapshot.docs.map((doc) => doc.data() as RecipeIngredient);
   const quantities = new Map<string, number>();
 
@@ -1691,6 +1698,7 @@ function conflict(operation: SyncPushOperation, code: string, message: string): 
 }
 
 function errorResult(operation: SyncPushOperation, error: unknown): SyncPushResult {
+  if (isResourceExhausted(error)) return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: quotaError };
   if (error instanceof PaymentValidationError) return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: { code: "validation_error", message: error.message, retryable: false } };
   if (error instanceof ZodError) {
     return {

@@ -1,3 +1,5 @@
+import { oncePerRequest } from "../utils/request-context.js";
+import { runLoggedTransaction } from "../modules/sync/logged-transaction.js";
 ﻿import { db, FieldValue } from "../config/firebase.js";
 import type { BillingCycle, Category, MenuItem, Restaurant, RestaurantPlan, SubscriptionStatus } from "../types.js";
 import { withId } from "../utils/firestore.js";
@@ -39,7 +41,7 @@ export async function findRestaurantByDomain(host: string, activeOnly = false) {
 }
 
 export async function assertRestaurantExists(restaurantId: string) {
-  const doc = await restaurants.doc(restaurantId).get();
+  const doc = await oncePerRequest(`restaurant:${restaurantId}`, () => restaurants.doc(restaurantId).get());
   if (!doc.exists) {
     throw new HttpError(404, "Restaurant not found");
   }
@@ -102,17 +104,17 @@ export async function updateRestaurant(restaurantId: string, input: Partial<Rest
     updateData.customDomain = input.customDomain ? normalizeDomain(input.customDomain) : input.customDomain;
   }
 
-  await restaurants.doc(restaurantId).update(updateData);
+  await runLoggedTransaction(db, async tx => { tx.update(restaurants.doc(restaurantId), updateData); });
 }
 
 export async function updateRestaurantPlan(restaurantId: string, plan: Restaurant["plan"], template?: Restaurant["template"]) {
   const current = await getRestaurantById(restaurantId);
-  await restaurants.doc(restaurantId).update({
+  await runLoggedTransaction(db, async tx => { tx.update(restaurants.doc(restaurantId), {
     plan,
     template: normalizeTemplateForPlan(plan, template ?? current.template),
     modules: normalizeModules(plan, current.modules),
     updatedAt: FieldValue.serverTimestamp()
-  });
+  }); });
 }
 
 export async function updateRestaurantSubscription(
@@ -128,7 +130,7 @@ export async function updateRestaurantSubscription(
 ) {
   const current = await getRestaurantById(restaurantId);
   const nextPlan = input.plan ?? current.plan ?? "basic";
-  await restaurants.doc(restaurantId).update({
+  await runLoggedTransaction(db, async tx => { tx.update(restaurants.doc(restaurantId), {
     plan: nextPlan,
     template: normalizeTemplateForPlan(nextPlan, current.template),
     modules: normalizeModules(nextPlan, current.modules),
@@ -139,7 +141,7 @@ export async function updateRestaurantSubscription(
     subscriptionEndsAt: input.endsAt ?? current.subscriptionEndsAt ?? "",
     subscriptionNotes: input.notes ?? "",
     updatedAt: FieldValue.serverTimestamp()
-  });
+  }); });
 }
 
 export async function addRestaurantPayment(
@@ -179,10 +181,10 @@ export async function addRestaurantPayment(
     notes: restaurant.subscriptionNotes ?? ""
   });
 
-  await restaurants.doc(restaurantId).update({
+  await runLoggedTransaction(db, async tx => { tx.update(restaurants.doc(restaurantId), {
     lastPaymentAt: paidAt,
     updatedAt: FieldValue.serverTimestamp()
-  });
+  }); });
 
   return { id: ref.id, endsAt };
 }
@@ -193,12 +195,12 @@ export async function updateRestaurantDomain(restaurantId: string, customDomain:
     assertCustomDomainAllowed(restaurant.plan ?? "basic");
   }
 
-  await restaurants.doc(restaurantId).update({
+  await runLoggedTransaction(db, async tx => { tx.update(restaurants.doc(restaurantId), {
     customDomain: customDomain ? normalizeDomain(customDomain) : "",
     customDomainStatus: customDomainStatus ?? "none",
     customDomainVerifiedAt: customDomainStatus === "verified" ? new Date().toISOString() : "",
     updatedAt: FieldValue.serverTimestamp()
-  });
+  }); });
 }
 
 export async function listSubscriptionRequests() {
@@ -208,7 +210,7 @@ export async function listSubscriptionRequests() {
 
 export async function deleteRestaurant(restaurantId: string) {
   await assertRestaurantExists(restaurantId);
-  await restaurants.doc(restaurantId).delete();
+  await runLoggedTransaction(db, async tx => { tx.delete(restaurants.doc(restaurantId)); });
 }
 
 export async function listCategories(restaurantId: string, activeOnly = false) {
@@ -219,21 +221,14 @@ export async function listCategories(restaurantId: string, activeOnly = false) {
 }
 
 export async function createCategory(restaurantId: string, input: Omit<Category, "id">) {
-  const restaurant = await getRestaurantById(restaurantId);
-  const snapshot = await restaurants.doc(restaurantId).collection("categories").get();
-  assertCategoryLimit(restaurant.plan ?? "basic", snapshot.size);
-  const ref = await restaurants.doc(restaurantId).collection("categories").add(input);
-  return { id: ref.id };
+  return createCountedMenuRecord(restaurantId, "categories", input);
 }
-
 export async function updateCategory(restaurantId: string, categoryId: string, input: Partial<Category>) {
   await assertRestaurantExists(restaurantId);
-  await restaurants.doc(restaurantId).collection("categories").doc(categoryId).update(input);
+  await runLoggedTransaction(db, async tx => { tx.update(restaurants.doc(restaurantId).collection("categories").doc(categoryId), input); });
 }
-
 export async function deleteCategory(restaurantId: string, categoryId: string) {
-  await assertRestaurantExists(restaurantId);
-  await restaurants.doc(restaurantId).collection("categories").doc(categoryId).delete();
+  await deleteCountedMenuRecord(restaurantId, "categories", categoryId);
 }
 
 export async function listItems(restaurantId: string, availableOnly = false) {
@@ -245,29 +240,50 @@ export async function listItems(restaurantId: string, availableOnly = false) {
 
 export async function createItem(restaurantId: string, input: Omit<MenuItem, "id" | "createdAt" | "updatedAt">) {
   const restaurant = await getRestaurantById(restaurantId);
-  const snapshot = await restaurants.doc(restaurantId).collection("items").get();
-  assertItemLimit(restaurant.plan ?? "basic", snapshot.size);
-  const normalized = enforceItemPlanRules(restaurant.plan ?? "basic", input, true);
-  const ref = await restaurants.doc(restaurantId).collection("items").add({
-    ...normalized,
-    createdAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp()
-  });
-  return { id: ref.id };
+  return createCountedMenuRecord(restaurantId, "items", enforceItemPlanRules(restaurant.plan ?? "basic", input, true));
 }
-
 export async function updateItem(restaurantId: string, itemId: string, input: Partial<MenuItem>) {
   const restaurant = await getRestaurantById(restaurantId);
   const normalized = enforceItemPlanRules(restaurant.plan ?? "basic", input, true);
-  await restaurants.doc(restaurantId).collection("items").doc(itemId).update({
-    ...normalized,
-    updatedAt: FieldValue.serverTimestamp()
-  });
+  await runLoggedTransaction(db, async tx => { tx.update(restaurants.doc(restaurantId).collection("items").doc(itemId), { ...normalized, updatedAt: FieldValue.serverTimestamp() }); });
+}
+export async function deleteItem(restaurantId: string, itemId: string) {
+  await deleteCountedMenuRecord(restaurantId, "items", itemId);
 }
 
-export async function deleteItem(restaurantId: string, itemId: string) {
-  await assertRestaurantExists(restaurantId);
-  await restaurants.doc(restaurantId).collection("items").doc(itemId).delete();
+// Initialized in the same transaction as the first mutation. All writers use it.
+async function menuCount(tx: FirebaseFirestore.Transaction, restaurantId: string, collection: "items" | "categories") {
+  const parent = restaurants.doc(restaurantId);
+  const ref = parent.collection("usageMeta").doc(collection);
+  const counter = await tx.get(ref);
+  if (counter.exists && counter.data()?.schemaVersion === 1) return { ref, count: Number(counter.data()!.count), initialized: true };
+  const snapshot = await tx.get(parent.collection(collection));
+  return { ref, count: snapshot.size, initialized: false };
+}
+async function createCountedMenuRecord(restaurantId: string, collection: "items" | "categories", input: Record<string, unknown>) {
+  const parent = restaurants.doc(restaurantId);
+  const ref = parent.collection(collection).doc();
+  await runLoggedTransaction(db, async tx => {
+    const restaurant = (await tx.get(parent)).data() as Restaurant | undefined;
+    if (!restaurant) throw new HttpError(404, "Restaurant not found");
+    const counter = await menuCount(tx, restaurantId, collection);
+    if (collection === "items") assertItemLimit(restaurant.plan ?? "basic", counter.count);
+    else assertCategoryLimit(restaurant.plan ?? "basic", counter.count);
+    const data = collection === "items" ? enforceItemPlanRules(restaurant.plan ?? "basic", input as Partial<MenuItem>, true) : input;
+    tx.set(ref, { ...data, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+    tx.set(counter.ref, { count: counter.count + 1, schemaVersion: 1 });
+  });
+  return { id: ref.id };
+}
+async function deleteCountedMenuRecord(restaurantId: string, collection: "items" | "categories", id: string) {
+  const ref = restaurants.doc(restaurantId).collection(collection).doc(id);
+  await runLoggedTransaction(db, async tx => {
+    const snapshot = await tx.get(ref);
+    if (!snapshot.exists) return;
+    const counter = await menuCount(tx, restaurantId, collection);
+    tx.delete(ref);
+    tx.set(counter.ref, { count: Math.max(0, counter.count - 1), schemaVersion: 1 });
+  });
 }
 
 function isPubliclyAvailable(restaurant: Restaurant) {
@@ -289,3 +305,12 @@ function omitUndefined<T extends Record<string, unknown>>(value: T) {
   ) as Partial<T>;
 }
 
+
+export async function getMenuUsage(restaurantId: string) {
+  return db.runTransaction(async tx => {
+    const [categories, items] = await Promise.all([menuCount(tx, restaurantId, "categories"), menuCount(tx, restaurantId, "items")]);
+    if (!categories.initialized) tx.set(categories.ref, { count: categories.count, schemaVersion: 1 });
+    if (!items.initialized) tx.set(items.ref, { count: items.count, schemaVersion: 1 });
+    return { categories: categories.count, items: items.count };
+  });
+}

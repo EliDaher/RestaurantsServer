@@ -9,6 +9,7 @@ import {
   deleteCategory,
   deleteItem,
   getRestaurantById,
+  getMenuUsage,
   listCategories,
   listItems,
   updateCategory,
@@ -81,11 +82,7 @@ ownerRouter.post("/receipt-printer/cut", async (req, res, next) => {
 ownerRouter.get("/subscription", async (req, res, next) => {
   try {
     const restaurantId = getRequiredRestaurantId(req);
-    const [restaurant, categories, items] = await Promise.all([
-      getRestaurantById(restaurantId),
-      listCategories(restaurantId),
-      listItems(restaurantId)
-    ]);
+    const [restaurant, usage] = await Promise.all([getRestaurantById(restaurantId), getMenuUsage(restaurantId)]);
     const limits = planLimits[restaurant.plan ?? "basic"];
 
     sendJson(res, {
@@ -95,10 +92,7 @@ ownerRouter.get("/subscription", async (req, res, next) => {
       endsAt: restaurant.subscriptionEndsAt ?? "",
       lastPaymentAt: restaurant.lastPaymentAt ?? "",
       limits,
-      usage: {
-        categories: categories.length,
-        items: items.length
-      },
+      usage,
       customDomain: restaurant.customDomain ?? "",
       customDomainStatus: restaurant.customDomainStatus ?? "none"
     });
