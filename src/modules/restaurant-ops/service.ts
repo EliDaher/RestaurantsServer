@@ -54,7 +54,7 @@ type OrderInput = {
   type: Order["type"];
   source: Order["source"];
   status: Order["status"];
-  items: Array<{ menuItemId: string; quantity: number; notes: string; modifiers: string[] }>;
+  items: Array<{ menuItemId: string; quantity: number; unitPrice?: number; total?: number; notes: string; modifiers: string[] }>;
   discount: number;
   tax: number;
   serviceCharge: number;
@@ -1009,7 +1009,8 @@ async function hydrateOrderItems(restaurantId: string, lines: OrderInput["items"
 
     const menuItem = itemSnapshot.data() as MenuItem;
     const quantity = numberValue(line.quantity);
-    const unitPrice = numberValue(menuItem.price);
+    const unitPrice = line.unitPrice ?? numberValue(menuItem.price);
+    const total = line.total ?? quantity * unitPrice;
     items.push({
       menuItemId: line.menuItemId,
       name: menuItem.name,
@@ -1017,7 +1018,7 @@ async function hydrateOrderItems(restaurantId: string, lines: OrderInput["items"
       unitPrice,
       notes: line.notes,
       modifiers: line.modifiers,
-      total: quantity * unitPrice
+      total
     });
   }
 

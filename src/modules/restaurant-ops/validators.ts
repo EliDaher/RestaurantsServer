@@ -32,6 +32,8 @@ export const tablePatchSchema = tableCreateSchema.partial();
 export const orderLineInputSchema = z.object({
   menuItemId: z.string().trim().min(1),
   quantity: z.coerce.number().positive(),
+  unitPrice: z.coerce.number().finite().min(0).optional(),
+  total: z.coerce.number().finite().min(0).optional(),
   notes: z.string().trim().default(""),
   modifiers: z.array(z.string().trim()).default([])
 });

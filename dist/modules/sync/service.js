@@ -1028,7 +1028,8 @@ async function hydrateOrderItems(transaction, restaurantId, lines) {
         }
         const menuItem = itemSnapshot.data();
         const quantity = numberValue(line.quantity);
-        const unitPrice = numberValue(menuItem.price);
+        const unitPrice = line.unitPrice ?? numberValue(menuItem.price);
+        const total = line.total ?? quantity * unitPrice;
         return {
             menuItemId: line.menuItemId,
             name: menuItem.name,
@@ -1036,7 +1037,7 @@ async function hydrateOrderItems(transaction, restaurantId, lines) {
             unitPrice,
             notes: line.notes,
             modifiers: line.modifiers,
-            total: quantity * unitPrice
+            total
         };
     });
 }
