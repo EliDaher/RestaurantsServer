@@ -1,6 +1,10 @@
 import { orderRecipes } from "../../utils/recipe-query.js";
 import { isResourceExhausted, quotaError } from "../../utils/firestore-errors.js";
 import { runLoggedTransaction } from "./logged-transaction.js";
+import { applyInventoryMovement } from "./inventory.js";
+import { isTransientFirestoreError } from "../../utils/firestore-errors.js";
+import { createInvoice } from "../restaurant-ops/service.js";
+import { invoiceCreateSchema } from "../restaurant-ops/validators.js";
 import { assertPaymentContext } from "../restaurant-ops/payment-context.js";
 import { preparePaymentReversals } from "../restaurant-ops/payment-reversals.js";
 import { prepareExpenseArtifacts } from "../restaurant-ops/expense-artifacts.js";
@@ -38,6 +42,16 @@ export async function pushOperations(restaurantId, user, deviceId, operations) {
     return { results };
 }
 async function applyOperation(restaurantId, user, deviceId, operation) {
+    if (operation.entityType === "invoice" && operation.action === "create") {
+        assertPermissionForSync(user, "accounting.manage");
+        const input = invoiceCreateSchema.parse(operation.payload);
+        const response = await createInvoice(restaurantId, input, user.id ?? user.email, { operation, deviceId });
+        return { operationId: operation.operationId, entityType: operation.entityType, entityId: operation.entityId, status: "applied", response };
+    }
+    if (operation.entityType === "inventoryTransaction") {
+        assertPermissionForSync(user, "inventory.adjust");
+        return applyInventoryMovement(restaurantId, user, deviceId, operation);
+    }
     if (operation.entityType === "table") {
         assertPermissionForSync(user, "tables.manage");
         return applyTableOperation(restaurantId, user, deviceId, operation);
@@ -1362,6 +1376,8 @@ function conflict(operation, code, message) {
     };
 }
 function errorResult(operation, error) {
+    if (isTransientFirestoreError(error))
+        return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: { code: "firestore_unavailable", message: "Temporary data service failure", retryable: true } };
     if (isResourceExhausted(error))
         return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: quotaError };
     if (error instanceof PaymentValidationError)
@@ -1391,7 +1407,7 @@ function errorResult(operation, error) {
             error: {
                 code,
                 message: error.message,
-                retryable: error.status >= 500
+                retryable: error.status >= 500 || error.status === 429 || error.status === 408 || error.status === 404
             }
         };
     }
@@ -1432,6 +1448,8 @@ function errorCodeFor(operation, error) {
     const explicitCode = error.details?.code;
     if (explicitCode)
         return explicitCode;
+    if (error.status === 401)
+        return "auth_required";
     if (error.status === 403)
         return "permission_denied";
     if (operation.entityType === "order" && error.status === 404 && /Order not found/i.test(error.message))

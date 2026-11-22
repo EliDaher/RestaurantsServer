@@ -127,11 +127,13 @@ async function loadMenu(id: string) {
 async function loadState(id: string) {
     // One consistent snapshot for table pointers and their active orders. No history scan.
     return db.runTransaction(async tx => {
-        const [tables, orders] = await Promise.all([
+        const [tables, orders, meta] = await Promise.all([
             tx.get(root(id).collection("tables")),
-            tx.get(root(id).collection("orders").where("status", "in", activeStatuses))
+            tx.get(root(id).collection("orders").where("status", "in", activeStatuses)),
+            tx.get(root(id).collection("syncMeta").doc("main"))
         ]);
         return {
+            cursor: Number(meta.data()?.cursor ?? 0),
             tables: tables.docs.filter(d => !d.data().deletedAt && d.data().status !== "DISABLED").map(d => visibleTable(d.id, d.data())),
             orders: orders.docs.map(d => visibleOrder(d.id, d.data()))
         };
@@ -142,6 +144,25 @@ waiterRouter.get("/menu", async (req, res, next) => {
 });
 waiterRouter.get("/state", async (req, res, next) => {
     try { sendJson(res, await loadState(req.user!.restaurantId!)); } catch (e) { next(e); }
+});
+waiterRouter.get("/changes", async (req, res, next) => {
+  try {
+    const cursor = z.coerce.number().int().min(0).parse(req.query.cursor);
+    const parent = root(req.user!.restaurantId!);
+    const page = await parent.collection("changeLog").where("cursor", ">", cursor).orderBy("cursor").limit(200).get();
+    const changes = new Map<string, { entityType: string; entityId: string }>();
+    for (const doc of page.docs) {
+      const change = doc.data();
+      if (["table", "order"].includes(change.entityType)) changes.set(`${change.entityType}:${change.entityId}`, change as { entityType: string; entityId: string });
+    }
+    const updates = await Promise.all([...changes.values()].map(async change => {
+      const doc = await parent.collection(change.entityType === "table" ? "tables" : "orders").doc(change.entityId).get();
+      const data = doc.data();
+      const visible = data && !data.deletedAt && (change.entityType === "table" ? data.status !== "DISABLED" : activeStatuses.includes(data.status));
+      return { ...change, data: visible ? (change.entityType === "table" ? visibleTable(doc.id, data!) : visibleOrder(doc.id, data!)) : null };
+    }));
+    sendJson(res, { cursor: Number(page.docs.at(-1)?.data().cursor ?? cursor), hasMore: page.docs.length === 200, updates });
+  } catch (error) { next(error); }
 });
 // Compatibility for previously opened clients; the new client never polls this route.
 waiterRouter.get("/bootstrap", async (req, res, next) => {

@@ -1,6 +1,10 @@
 import { orderRecipes } from "../../utils/recipe-query.js";
 import { isResourceExhausted, quotaError } from "../../utils/firestore-errors.js";
 import { runLoggedTransaction } from "./logged-transaction.js";
+import { applyInventoryMovement } from "./inventory.js";
+import { isTransientFirestoreError } from "../../utils/firestore-errors.js";
+import { createInvoice } from "../restaurant-ops/service.js";
+import { invoiceCreateSchema } from "../restaurant-ops/validators.js";
 import { assertPaymentContext } from "../restaurant-ops/payment-context.js";
 import { preparePaymentReversals } from "../restaurant-ops/payment-reversals.js";
 import { prepareExpenseArtifacts } from "../restaurant-ops/expense-artifacts.js";
@@ -58,6 +62,16 @@ export async function pushOperations(restaurantId: string, user: AuthUser, devic
 }
 
 async function applyOperation(restaurantId: string, user: AuthUser, deviceId: string, operation: SyncPushOperation): Promise<SyncPushResult> {
+  if (operation.entityType === "invoice" && operation.action === "create") {
+    assertPermissionForSync(user, "accounting.manage");
+    const input = invoiceCreateSchema.parse(operation.payload);
+    const response = await createInvoice(restaurantId, input, user.id ?? user.email, { operation, deviceId });
+    return { operationId: operation.operationId, entityType: operation.entityType, entityId: operation.entityId, status: "applied", response };
+  }
+  if (operation.entityType === "inventoryTransaction") {
+    assertPermissionForSync(user, "inventory.adjust");
+    return applyInventoryMovement(restaurantId, user, deviceId, operation);
+  }
   if (operation.entityType === "table") {
     assertPermissionForSync(user, "tables.manage");
     return applyTableOperation(restaurantId, user, deviceId, operation);
@@ -1698,6 +1712,7 @@ function conflict(operation: SyncPushOperation, code: string, message: string): 
 }
 
 function errorResult(operation: SyncPushOperation, error: unknown): SyncPushResult {
+  if (isTransientFirestoreError(error)) return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: { code: "firestore_unavailable", message: "Temporary data service failure", retryable: true } };
   if (isResourceExhausted(error)) return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: quotaError };
   if (error instanceof PaymentValidationError) return { operationId: operation.operationId, status: "rejected", entityType: operation.entityType, entityId: operation.entityId, error: { code: "validation_error", message: error.message, retryable: false } };
   if (error instanceof ZodError) {
@@ -1726,7 +1741,7 @@ function errorResult(operation: SyncPushOperation, error: unknown): SyncPushResu
       error: {
         code,
         message: error.message,
-        retryable: error.status >= 500
+        retryable: error.status >= 500 || error.status === 429 || error.status === 408 || error.status === 404
       }
     };
   }
@@ -1771,6 +1786,7 @@ function assertPermissionForSync(user: AuthUser, permission: Parameters<typeof h
 function errorCodeFor(operation: SyncPushOperation, error: HttpError) {
   const explicitCode = (error.details as { code?: string } | undefined)?.code;
   if (explicitCode) return explicitCode;
+  if (error.status === 401) return "auth_required";
   if (error.status === 403) return "permission_denied";
   if (operation.entityType === "order" && error.status === 404 && /Order not found/i.test(error.message)) return "missing_order_dependency";
   if (operation.entityType === "order" && error.status === 404 && /Cash register not found/i.test(error.message)) return "cash_register_missing";

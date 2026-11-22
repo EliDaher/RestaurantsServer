@@ -10,8 +10,6 @@ export function incrementalEnabled(tenant) {
 export async function snapshotPage(tenant, entity, after) {
     if (!Object.hasOwn(entityCollections, entity))
         throw new HttpError(400, "Invalid snapshot entity");
-    if (!incrementalEnabled(tenant))
-        throw new HttpError(409, "Incremental sync is not enabled");
     const parent = db.collection("restaurants").doc(tenant);
     return db.runTransaction(async (tx) => {
         const meta = measuredSnapshot(await tx.get(parent.collection("syncMeta").doc("main")));

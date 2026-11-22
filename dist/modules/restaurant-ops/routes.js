@@ -1,9 +1,10 @@
 import { Router } from "express";
+import { durableWrite, durableWriteKey } from "./durable-write.js";
 import { assertPermission } from "../../services/permissions.js";
 import { getTenantContext } from "../../services/tenant.js";
 import { sendJson } from "../../utils/http.js";
 import { accountCreateSchema, accountPatchSchema, cashMovementCreateSchema, cashRegisterCreateSchema, cancelOrderSchema, completeOrderSchema, expenseCreateSchema, expensePatchSchema, inventoryAdjustmentSchema, inventoryItemCreateSchema, inventoryItemPatchSchema, invoiceCreateSchema, invoicePatchSchema, journalEntryCreateSchema, menuItemRecipeSaveSchema, orderCreateSchema, orderPatchSchema, paymentCreateSchema, recipeIngredientCreateSchema, reportQuerySchema, supplierCreateSchema, supplierPatchSchema, tableCreateSchema, tablePatchSchema } from "./validators.js";
-import { adjustInventory, cancelOrder, completeOrder, createAccount, createCashMovement, createCashRegister, createExpense, createInventoryItem, createInvoice, createJournalEntry, createOrder, createPayment, createRecipeIngredient, createSupplier, createTable, deleteAccount, deleteExpense, deleteInventoryItem, deleteInvoice, deletePayment, deleteRecipeIngredient, deleteSupplier, deleteTable, getAccount, getCashMovement, getCashRegister, getExpense, getInventoryItem, getInvoice, getJournalEntry, getOrder, getPayment, getReportsSummary, getSupplier, getTable, listAccounts, listCashMovements, listCashRegisters, listExpenses, listInventoryItems, listInventoryTransactions, listInvoices, listJournalEntries, listOrders, listPayments, listRecipeIngredients, listSuppliers, listTables, saveMenuItemRecipe, updateInventoryItem, updateAccount, updateExpense, updateInvoice, updateOrder, updateSupplier, updateTable } from "./service.js";
+import { cancelOrder, completeOrder, createAccount, createCashRegister, createInventoryItem, createJournalEntry, createOrder, createPayment, createRecipeIngredient, createSupplier, createTable, deleteAccount, deleteExpense, deleteInventoryItem, deleteInvoice, deletePayment, deleteRecipeIngredient, deleteSupplier, deleteTable, getAccount, getCashMovement, getCashRegister, getExpense, getInventoryItem, getInvoice, getJournalEntry, getOrder, getPayment, getReportsSummary, getSupplier, getTable, listAccounts, listCashMovements, listCashRegisters, listExpenses, listInventoryItems, listInventoryTransactions, listInvoices, listJournalEntries, listOrders, listPayments, listRecipeIngredients, listSuppliers, listTables, saveMenuItemRecipe, updateInventoryItem, updateAccount, updateExpense, updateInvoice, updateOrder, updateSupplier, updateTable } from "./service.js";
 export const restaurantOpsRouter = Router();
 restaurantOpsRouter.get("/modules", async (req, res, next) => {
     try {
@@ -205,7 +206,7 @@ restaurantOpsRouter.post("/inventory/transactions", async (req, res, next) => {
         assertPermission(req, "inventory.adjust");
         const { restaurantId } = await getTenantContext(req, "inventory");
         const input = inventoryAdjustmentSchema.parse(req.body);
-        sendJson(res, await adjustInventory(restaurantId, input, req.user?.id ?? req.user?.email ?? "owner"), 201);
+        sendJson(res, await durableWrite(req, restaurantId, "inventoryTransaction", "adjustInventory", input), 201);
     }
     catch (error) {
         next(error);
@@ -333,7 +334,7 @@ restaurantOpsRouter.post("/invoices", async (req, res, next) => {
         assertPermission(req, "accounting.manage");
         const { restaurantId } = await getTenantContext(req, "accounting");
         const input = invoiceCreateSchema.parse(req.body);
-        sendJson(res, await createInvoice(restaurantId, input, req.user?.id ?? req.user?.email ?? "owner"), 201);
+        sendJson(res, await durableWrite(req, restaurantId, "invoice", "create", input), 201);
     }
     catch (error) {
         next(error);
@@ -387,7 +388,7 @@ restaurantOpsRouter.post("/payments", async (req, res, next) => {
         assertPermission(req, "payments.create");
         const { restaurantId } = await getTenantContext(req, "payments");
         const input = paymentCreateSchema.parse(req.body);
-        sendJson(res, await createPayment(restaurantId, input, req.user?.id ?? req.user?.email ?? "owner"), 201);
+        sendJson(res, await createPayment(restaurantId, input, req.user?.id ?? req.user?.email ?? "owner", durableWriteKey(req)), 201);
     }
     catch (error) {
         next(error);
@@ -429,7 +430,7 @@ restaurantOpsRouter.post("/expenses", async (req, res, next) => {
         assertPermission(req, "expenses.create");
         const { restaurantId } = await getTenantContext(req, "expenses");
         const input = expenseCreateSchema.parse(req.body);
-        sendJson(res, await createExpense(restaurantId, input, req.user?.id ?? req.user?.email ?? "owner"), 201);
+        sendJson(res, await durableWrite(req, restaurantId, "expense", "create", input), 201);
     }
     catch (error) {
         next(error);
@@ -514,7 +515,7 @@ restaurantOpsRouter.post("/cash/movements", async (req, res, next) => {
         assertPermission(req, "accounting.manage");
         const { restaurantId } = await getTenantContext(req, "accounting");
         const input = cashMovementCreateSchema.parse(req.body);
-        sendJson(res, await createCashMovement(restaurantId, input, req.user?.id ?? req.user?.email ?? "owner"), 201);
+        sendJson(res, await durableWrite(req, restaurantId, "cashMovement", "create", input), 201);
     }
     catch (error) {
         next(error);

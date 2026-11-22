@@ -1,0 +1,505 @@
+TAP version 13
+# Subtest: accepts business-day settings without overwriting them in unrelated patches
+ok 1 - accepts business-day settings without overwriting them in unrelated patches
+  ---
+  duration_ms: 4.1662
+  type: 'test'
+  ...
+# (node:33844) ExperimentalWarning: Module mocking is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: financial transaction integration with an isolated store
+    # Subtest: syncs mixed partial checkout once, settles later at a new rate, and refunds every payment
+    ok 1 - syncs mixed partial checkout once, settles later at a new rate, and refunds every payment
+      ---
+      duration_ms: 50.6375
+      type: 'test'
+      ...
+    # Subtest: direct checkout follows identical conversion rules
+    ok 2 - direct checkout follows identical conversion rules
+      ---
+      duration_ms: 2.7765
+      type: 'test'
+      ...
+    # Subtest: rejects invalid totals and a missing saved rate without any writes
+    ok 3 - rejects invalid totals and a missing saved rate without any writes
+      ---
+      duration_ms: 3.1575
+      type: 'test'
+      ...
+    # Subtest: records supplier debt, then pays it using mixed currencies
+    ok 4 - records supplier debt, then pays it using mixed currencies
+      ---
+      duration_ms: 3.6611
+      type: 'test'
+      ...
+    # Subtest: records partial expenses, settles the payable and restores cash on deletion
+    ok 5 - records partial expenses, settles the payable and restores cash on deletion
+      ---
+      duration_ms: 5.0473
+      type: 'test'
+      ...
+    # Subtest: persists an optional customer name independently for FULL ("  أحمد العلي  ")
+    ok 6 - persists an optional customer name independently for FULL ("  أحمد العلي  ")
+      ---
+      duration_ms: 2.9198
+      type: 'test'
+      ...
+    # Subtest: persists an optional customer name independently for PARTIAL ("ليلى")
+    ok 7 - persists an optional customer name independently for PARTIAL ("ليلى")
+      ---
+      duration_ms: 2.3179
+      type: 'test'
+      ...
+    # Subtest: persists an optional customer name independently for DEBT ("زبون الدين")
+    ok 8 - persists an optional customer name independently for DEBT ("زبون الدين")
+      ---
+      duration_ms: 2.7879
+      type: 'test'
+      ...
+    # Subtest: persists an optional customer name independently for FULL ("   ")
+    ok 9 - persists an optional customer name independently for FULL ("   ")
+      ---
+      duration_ms: 1.8679
+      type: 'test'
+      ...
+    # Subtest: persists an optional customer name independently for DEBT (undefined)
+    ok 10 - persists an optional customer name independently for DEBT (undefined)
+      ---
+      duration_ms: 1.6549
+      type: 'test'
+      ...
+    # Subtest: trims and preserves customer names through the direct checkout endpoint
+    ok 11 - trims and preserves customer names through the direct checkout endpoint
+      ---
+      duration_ms: 1.0767
+      type: 'test'
+      ...
+    1..11
+ok 2 - financial transaction integration with an isolated store
+  ---
+  duration_ms: 81.4007
+  type: 'suite'
+  ...
+# (node:33140) ExperimentalWarning: Module mocking is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: lost inventory acknowledgment retries the same movement without a second stock deduction
+ok 3 - lost inventory acknowledgment retries the same movement without a second stock deduction
+  ---
+  duration_ms: 14.2929
+  type: 'test'
+  ...
+# Subtest: Firestore deadline, unavailable and contention errors are retryable
+ok 4 - Firestore deadline, unavailable and contention errors are retryable
+  ---
+  duration_ms: 1.9125
+  type: 'test'
+  ...
+# Subtest: a missing inventory parent retries without creating a movement
+ok 5 - a missing inventory parent retries without creating a movement
+  ---
+  duration_ms: 0.8867
+  type: 'test'
+  ...
+# Subtest: direct payment receipt survives record deletion and lost-response retries
+ok 6 - direct payment receipt survives record deletion and lost-response retries
+  ---
+  duration_ms: 5.5797
+  type: 'test'
+  ...
+# Subtest: order versioning rules
+    # Subtest: uses an explicit server version when present
+    ok 1 - uses an explicit server version when present
+      ---
+      duration_ms: 1.5242
+      type: 'test'
+      ...
+    # Subtest: falls back to updatedAt for existing unversioned orders
+    ok 2 - falls back to updatedAt for existing unversioned orders
+      ---
+      duration_ms: 0.3856
+      type: 'test'
+      ...
+    # Subtest: falls back to Firestore timestamp millis for existing unversioned orders
+    ok 3 - falls back to Firestore timestamp millis for existing unversioned orders
+      ---
+      duration_ms: 0.2414
+      type: 'test'
+      ...
+    # Subtest: falls back to createdAt when updatedAt is unavailable
+    ok 4 - falls back to createdAt when updatedAt is unavailable
+      ---
+      duration_ms: 0.1313
+      type: 'test'
+      ...
+    # Subtest: uses zero for old orders without version timestamps
+    ok 5 - uses zero for old orders without version timestamps
+      ---
+      duration_ms: 0.135
+      type: 'test'
+      ...
+    # Subtest: increments beyond the current version when the clock is behind
+    ok 6 - increments beyond the current version when the clock is behind
+      ---
+      duration_ms: 0.4442
+      type: 'test'
+      ...
+    # Subtest: uses the current clock when it is ahead of the stored version
+    ok 7 - uses the current clock when it is ahead of the stored version
+      ---
+      duration_ms: 0.0911
+      type: 'test'
+      ...
+    # Subtest: accepts a matching base version
+    ok 8 - accepts a matching base version
+      ---
+      duration_ms: 0.1482
+      type: 'test'
+      ...
+    # Subtest: rejects a missing base version
+    ok 9 - rejects a missing base version
+      ---
+      duration_ms: 0.3791
+      type: 'test'
+      ...
+    # Subtest: rejects a stale base version
+    ok 10 - rejects a stale base version
+      ---
+      duration_ms: 0.2914
+      type: 'test'
+      ...
+    1..10
+ok 7 - order versioning rules
+  ---
+  duration_ms: 7.0146
+  type: 'suite'
+  ...
+# Subtest: multi-currency settlement
+    # Subtest: settles one invoice with mixed currencies and methods
+    ok 1 - settles one invoice with mixed currencies and methods
+      ---
+      duration_ms: 2.2349
+      type: 'test'
+      ...
+    # Subtest: keeps historical snapshots stable after a new exchange rate
+    ok 2 - keeps historical snapshots stable after a new exchange rate
+      ---
+      duration_ms: 0.12
+      type: 'test'
+      ...
+    # Subtest: supports debt and partial while rejecting inconsistent states
+    ok 3 - supports debt and partial while rejecting inconsistent states
+      ---
+      duration_ms: 0.3172
+      type: 'test'
+      ...
+    # Subtest: validates precision, supported values, finite amounts and rates
+    ok 4 - validates precision, supported values, finite amounts and rates
+      ---
+      duration_ms: 0.2408
+      type: 'test'
+      ...
+    # Subtest: does not reinterpret legacy money and does not convert twice during synchronization
+    ok 5 - does not reinterpret legacy money and does not convert twice during synchronization
+      ---
+      duration_ms: 0.1889
+      type: 'test'
+      ...
+    1..5
+ok 8 - multi-currency settlement
+  ---
+  duration_ms: 3.9066
+  type: 'suite'
+  ...
+# (node:27800) ExperimentalWarning: Module mocking is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: cache coalesces concurrent work, expires, is bounded and never caches errors
+ok 9 - cache coalesces concurrent work, expires, is bounded and never caches errors
+  ---
+  duration_ms: 21.8272
+  type: 'test'
+  ...
+# Subtest: direct transaction journals every side effect atomically and preserves rollback
+ok 10 - direct transaction journals every side effect atomically and preserves rollback
+  ---
+  duration_ms: 2.589
+  type: 'test'
+  ...
+# Subtest: snapshot and journal preserve more than 500 records and resolve deletion
+ok 11 - snapshot and journal preserve more than 500 records and resolve deletion
+  ---
+  duration_ms: 19.4375
+  type: 'test'
+  ...
+# Subtest: public menu is reused and an atomic edit changes its version and invalidates it
+ok 12 - public menu is reused and an atomic edit changes its version and invalidates it
+  ---
+  duration_ms: 2.0164
+  type: 'test'
+  ...
+# Subtest: menu counters initialize once and deletions are idempotent
+ok 13 - menu counters initialize once and deletions are idempotent
+  ---
+  duration_ms: 1.3238
+  type: 'test'
+  ...
+# Subtest: quota failures are sanitized and temporary in both HTTP and per-operation results
+ok 14 - quota failures are sanitized and temporary in both HTTP and per-operation results
+  ---
+  duration_ms: 9.202
+  type: 'test'
+  ...
+# Subtest: indexed waiter history fetches only new batches and legacy history stays available
+ok 15 - indexed waiter history fetches only new batches and legacy history stays available
+  ---
+  duration_ms: 0.4983
+  type: 'test'
+  ...
+# Subtest: authenticated health reads no Firestore documents even during quota exhaustion
+ok 16 - authenticated health reads no Firestore documents even during quota exhaustion
+  ---
+  duration_ms: 62.9751
+  type: 'test'
+  ...
+# (node:20260) ExperimentalWarning: Module mocking is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: authenticated tenant sockets receive only committed changes and reconnect
+ok 17 - authenticated tenant sockets receive only committed changes and reconnect
+  ---
+  duration_ms: 101.7441
+  type: 'test'
+  ...
+# Subtest: sync operation idempotency contract
+    # Subtest: uses a stable payload fingerprint regardless of object key order
+    ok 1 - uses a stable payload fingerprint regardless of object key order
+      ---
+      duration_ms: 24.9431
+      type: 'test'
+      ...
+    # Subtest: changes the fingerprint when the mutation payload changes
+    ok 2 - changes the fingerprint when the mutation payload changes
+      ---
+      duration_ms: 0.36
+      type: 'test'
+      ...
+    # Subtest: accepts retrying the same operation from the same restaurant and device
+    ok 3 - accepts retrying the same operation from the same restaurant and device
+      ---
+      duration_ms: 0.9433
+      type: 'test'
+      ...
+    # Subtest: rejects reusing the same operation id with a different payload
+    ok 4 - rejects reusing the same operation id with a different payload
+      ---
+      duration_ms: 1.2334
+      type: 'test'
+      ...
+    # Subtest: rejects reusing the same operation id from another restaurant
+    ok 5 - rejects reusing the same operation id from another restaurant
+      ---
+      duration_ms: 0.6587
+      type: 'test'
+      ...
+    # Subtest: rejects reusing the same operation id from another device
+    ok 6 - rejects reusing the same operation id from another device
+      ---
+      duration_ms: 0.324
+      type: 'test'
+      ...
+    # Subtest: rejects reusing the same operation id for another order
+    ok 7 - rejects reusing the same operation id for another order
+      ---
+      duration_ms: 0.1485
+      type: 'test'
+      ...
+    # Subtest: rejects reusing the same operation id for another mutation action
+    ok 8 - rejects reusing the same operation id for another mutation action
+      ---
+      duration_ms: 1.5715
+      type: 'test'
+      ...
+    # Subtest: accepts legacy records that only stored the original payload hash
+    ok 9 - accepts legacy records that only stored the original payload hash
+      ---
+      duration_ms: 0.4556
+      type: 'test'
+      ...
+    # Subtest: uses the same idempotency contract for expense creation
+    ok 10 - uses the same idempotency contract for expense creation
+      ---
+      duration_ms: 0.71
+      type: 'test'
+      ...
+    # Subtest: uses the same idempotency contract for manual cash movement creation
+    ok 11 - uses the same idempotency contract for manual cash movement creation
+      ---
+      duration_ms: 0.3862
+      type: 'test'
+      ...
+    1..11
+ok 18 - sync operation idempotency contract
+  ---
+  duration_ms: 33.7855
+  type: 'suite'
+  ...
+# Subtest: restaurant-scoped atomic table identity
+    # Subtest: creates table 5 and rejects the same number in the same restaurant
+    ok 1 - creates table 5 and rejects the same number in the same restaurant
+      ---
+      duration_ms: 7.1964
+      type: 'test'
+      ...
+    # Subtest: allows the same number in different restaurants
+    ok 2 - allows the same number in different restaurants
+      ---
+      duration_ms: 0.7533
+      type: 'test'
+      ...
+    # Subtest: updates unchanged number and rejects rename to an occupied number
+    ok 3 - updates unchanged number and rejects rename to an occupied number
+      ---
+      duration_ms: 0.9028
+      type: 'test'
+      ...
+    # Subtest: rename releases old and acquires new reservation without changing stable IDs or orders
+    ok 4 - rename releases old and acquires new reservation without changing stable IDs or orders
+      ---
+      duration_ms: 0.8214
+      type: 'test'
+      ...
+    # Subtest: delete releases number and permits recreation
+    ok 5 - delete releases number and permits recreation
+      ---
+      duration_ms: 0.599
+      type: 'test'
+      ...
+    # Subtest: concurrent creates claim one number exactly once
+    ok 6 - concurrent creates claim one number exactly once
+      ---
+      duration_ms: 0.7977
+      type: 'test'
+      ...
+    # Subtest: concurrent renames to the same number have exactly one winner
+    ok 7 - concurrent renames to the same number have exactly one winner
+      ---
+      duration_ms: 0.6898
+      type: 'test'
+      ...
+    # Subtest: legacy data without reservations is protected, and audit is non-destructive
+    ok 8 - legacy data without reservations is protected, and audit is non-destructive
+      ---
+      duration_ms: 1.8943
+      type: 'test'
+      ...
+    # Subtest: soft-deleted records do not block reuse; deletion preparation works in sync write order
+    ok 9 - soft-deleted records do not block reuse; deletion preparation works in sync write order
+      ---
+      duration_ms: 0.5562
+      type: 'test'
+      ...
+    # Subtest: a transaction failure leaves no orphan reservation
+    ok 10 - a transaction failure leaves no orphan reservation
+      ---
+      duration_ms: 0.4173
+      type: 'test'
+      ...
+    # Subtest: delete never releases another table's reservation
+    ok 11 - delete never releases another table's reservation
+      ---
+      duration_ms: 0.2778
+      type: 'test'
+      ...
+    # Subtest: disabled live tables reserve their number, and named identities remain distinct
+    ok 12 - disabled live tables reserve their number, and named identities remain distinct
+      ---
+      duration_ms: 1.0554
+      type: 'test'
+      ...
+    # Subtest: normalization preserves legitimate names
+    ok 13 - normalization preserves legitimate names
+      ---
+      duration_ms: 0.1252
+      type: 'test'
+      ...
+    1..13
+ok 19 - restaurant-scoped atomic table identity
+  ---
+  duration_ms: 17.1662
+  type: 'suite'
+  ...
+# Subtest: duplicate conflicts retain HTTP 409 and a structured field/code response
+ok 20 - duplicate conflicts retain HTTP 409 and a structured field/code response
+  ---
+  duration_ms: 0.5296
+  type: 'test'
+  ...
+# (node:12068) ExperimentalWarning: Module mocking is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: additions from two waiters, retry after lost response, attribution and sync log
+ok 21 - additions from two waiters, retry after lost response, attribution and sync log
+  ---
+  duration_ms: 83.0345
+  type: 'test'
+  ...
+# Subtest: fake prices and actors rejected; closed orders and unavailable items are atomic
+ok 22 - fake prices and actors rejected; closed orders and unavailable items are atomic
+  ---
+  duration_ms: 17.3503
+  type: 'test'
+  ...
+# Subtest: disabled users, tenant isolation, owner access and price-free bootstrap
+ok 23 - disabled users, tenant isolation, owner access and price-free bootstrap
+  ---
+  duration_ms: 12.2718
+  type: 'test'
+  ...
+# Subtest: account uniqueness, login, password reset and disable
+ok 24 - account uniqueness, login, password reset and disable
+  ---
+  duration_ms: 255.9361
+  type: 'test'
+  ...
+# Subtest: history is tenant-scoped and preserves each waiter's name snapshot
+ok 25 - history is tenant-scoped and preserves each waiter's name snapshot
+  ---
+  duration_ms: 9.3912
+  type: 'test'
+  ...
+# Subtest: an old queued order never attaches to the next table order
+ok 26 - an old queued order never attaches to the next table order
+  ---
+  duration_ms: 6.8836
+  type: 'test'
+  ...
+# Subtest: general notes append atomically, retain attribution and never duplicate on retries
+ok 27 - general notes append atomically, retain attribution and never duplicate on retries
+  ---
+  duration_ms: 20.5871
+  type: 'test'
+  ...
+# Subtest: general note validation and rejected batches leave all order instructions unchanged
+ok 28 - general note validation and rejected batches leave all order instructions unchanged
+  ---
+  duration_ms: 10.1221
+  type: 'test'
+  ...
+# Subtest: waiter state reads every non-terminal status with a scoped query and never reads history or menu
+ok 29 - waiter state reads every non-terminal status with a scoped query and never reads history or menu
+  ---
+  duration_ms: 8.941
+  type: 'test'
+  ...
+# Subtest: batch confirmation and lost-response retry return current price-free table/order without repeating additions
+ok 30 - batch confirmation and lost-response retry return current price-free table/order without repeating additions
+  ---
+  duration_ms: 10.6753
+  type: 'test'
+  ...
+1..30
+# tests 75
+# suites 5
+# pass 75
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1129.2462

@@ -8,3 +8,9 @@ export const quotaError = {
   message: "خدمة البيانات مشغولة مؤقتاً. حُفظت العمليات المعلقة وستتم إعادة المحاولة.",
   retryable: true
 };
+
+export function isTransientFirestoreError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = String((error as { code?: unknown }).code ?? "").toLowerCase().replaceAll("_", "-").replace(/^firestore\//, "");
+  return ["4", "10", "13", "14", "deadline-exceeded", "aborted", "internal", "unavailable", "econnreset", "etimedout", "eai-again"].includes(code);
+}

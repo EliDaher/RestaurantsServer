@@ -5,6 +5,10 @@ import { preparePaymentReversals } from "./payment-reversals.js";
 import { prepareExpenseArtifacts } from "./expense-artifacts.js";
 import { normalizeMoney, normalizeSettlement, type PaymentPart, type SettlementMode } from "../../utils/payments.js";
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { operationRef, payloadHash } from "../sync/idempotency.js";
+import { assertSameOperationRecord } from "../sync/operation-record.js";
+import type { SyncPushOperation } from "../sync/types.js";
 import type { DocumentData, DocumentReference, QueryDocumentSnapshot } from "firebase-admin/firestore";
 import { db, FieldValue } from "../../config/firebase.js";
 import type { MenuItem, Restaurant } from "../../types.js";
@@ -676,7 +680,7 @@ export function getInvoice(restaurantId: string, invoiceId: string) {
   return getScoped<Invoice>(restaurantId, "invoices", invoiceId);
 }
 
-export async function createInvoice(restaurantId: string, input: InvoiceCreateInput, createdById: string) {
+export async function createInvoice(restaurantId: string, input: InvoiceCreateInput, createdById: string, sync?: { operation: SyncPushOperation; deviceId: string }) {
   const items = input.items.map(item => ({ ...item, total: item.total ?? item.quantity * item.unitPrice }));
   const subTotal = items.reduce((sum, item) => sum + item.total, 0);
   const total = Math.max(subTotal - input.discount + input.tax + input.serviceCharge, 0);
@@ -684,8 +688,16 @@ export async function createInvoice(restaurantId: string, input: InvoiceCreateIn
   const paidAmount = settlement?.paidAmount ?? input.paidAmount;
   if (paidAmount > total) throw new HttpError(400, "المدفوع أكبر من إجمالي الفاتورة.");
   const remainingAmount = total - paidAmount;
-  const invoiceRef = scopedCollection(restaurantId, "invoices").doc(randomUUID());
+  const invoiceRef = scopedCollection(restaurantId, "invoices").doc(sync?.operation.entityId ?? randomUUID());
   await runLoggedTransaction(db, async tx => {
+    if (sync) {
+      const prior = await tx.get(operationRef(restaurantId, sync.operation.operationId));
+      if (prior.exists) {
+        assertSameOperationRecord(sync.operation, prior.data()!, { restaurantId, deviceId: sync.deviceId, userId: createdById });
+        return;
+      }
+      if ((await tx.get(invoiceRef)).exists) throw new HttpError(409, "Invoice already exists", { code: "operation_reuse" });
+    }
     const restaurantSnap = await tx.get(db.collection("restaurants").doc(restaurantId));
     const restaurant = restaurantSnap.data() as Restaurant;
     if (settlement && restaurant.currency !== "SYP") throw new HttpError(400, "الحسابات الجديدة بالعملتين تتطلب التسعير بالليرة السورية.");
@@ -716,6 +728,7 @@ export async function createInvoice(restaurantId: string, input: InvoiceCreateIn
     if (supplierRef) tx.update(supplierRef, { balance: FieldValue.increment(remainingAmount), updatedAt: FieldValue.serverTimestamp() });
     const lines = input.type === "SALE" ? buildSaleJournalLines(paidAmount, remainingAmount, total) : [{ accountId: input.type === "PURCHASE" ? "purchases" : "sales_returns", debit: total, credit: 0, memo: "فاتورة" }, ...(paidAmount ? [{ accountId: "cash", debit: 0, credit: paidAmount, memo: "سداد" }] : []), ...(remainingAmount ? [{ accountId: "accounts_payable", debit: 0, credit: remainingAmount, memo: "متبقي" }] : [])];
     tx.set(scopedDoc(restaurantId, "journalEntries", `invoice_${invoiceRef.id}`), { restaurantId, status: "POSTED", referenceType: "INVOICE", referenceId: invoiceRef.id, lines, memo: input.notes, createdById, postedAt: new Date().toISOString(), createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+    if (sync) tx.set(operationRef(restaurantId, sync.operation.operationId), { restaurantId, deviceId: sync.deviceId, userId: createdById, entityType: "invoice", entityId: invoiceRef.id, action: "create", status: "applied", payloadHash: payloadHash(sync.operation), response: { id: invoiceRef.id }, createdAt: new Date().toISOString() });
   });
   return { id: invoiceRef.id };
 }
@@ -777,8 +790,23 @@ export function getPayment(restaurantId: string, paymentId: string) {
   return getScoped<OperationalPayment>(restaurantId, "payments", paymentId);
 }
 
-export function createPayment(restaurantId: string, input: Omit<OperationalPayment, "id" | "restaurantId" | "createdById" | "paidAt" | "createdAt"> & { paidAt?: string }, createdById: string) {
+export async function createPayment(restaurantId: string, input: Omit<OperationalPayment, "id" | "restaurantId" | "createdById" | "paidAt" | "createdAt"> & { paidAt?: string }, createdById: string, operationId?: string) {
   input = normalizeMoney(input);
+  if (operationId) {
+    const ref = scopedDoc(restaurantId, "payments", operationId);
+    const receipt = db.collection("restaurants").doc(restaurantId).collection("directPaymentReceipts").doc(operationId);
+    const hash = createHash("sha256").update(JSON.stringify({ input, createdById })).digest("hex");
+    await runLoggedTransaction(db, async tx => {
+      const existing = await tx.get(receipt);
+      if (existing.exists) {
+        if (existing.data()?.idempotencyHash !== hash) throw new HttpError(409, "Payment id reused", { code: "operation_reuse" });
+        return;
+      }
+      tx.create(ref, { ...input, restaurantId, createdById, paidAt: input.paidAt ?? new Date().toISOString(), createdAt: new Date().toISOString(), idempotencyHash: hash });
+      tx.create(receipt, { idempotencyHash: hash, paymentId: operationId });
+    });
+    return { id: operationId };
+  }
   return createScoped(restaurantId, "payments", {
     ...input,
     paidAt: input.paidAt ?? new Date().toISOString(),

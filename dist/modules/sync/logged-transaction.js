@@ -1,6 +1,7 @@
 import { measuredSnapshot } from "../../utils/read-metrics.js";
 import { randomUUID } from "node:crypto";
 import { publicInvalidation } from "../../services/public-invalidation.js";
+import { committedChanges } from "../../services/realtime.js";
 export const entityCollections = {
     table: "tables", order: "orders", inventoryItem: "inventoryItems",
     inventoryTransaction: "inventoryTransactions", recipeIngredient: "recipeIngredients",
@@ -71,9 +72,22 @@ export async function runLoggedTransaction(firestore, callback, options) {
         }
         for (const write of writes)
             raw[write.method](...write.args);
-        return { value, invalidated: [...invalidated] };
+        const notifications = new Map();
+        for (const write of writes) {
+            const parts = String(write.args[0].path).split("/");
+            if (parts.length !== 4 || parts[2] !== "changeLog")
+                continue;
+            const data = write.args[1];
+            const event = notifications.get(parts[1]) ?? { tenantId: parts[1], cursor: 0, changes: [] };
+            event.cursor = Math.max(event.cursor, Number(data.cursor));
+            event.changes.push({ entityType: data.entityType, entityId: data.entityId, version: data.version });
+            notifications.set(parts[1], event);
+        }
+        return { value, invalidated: [...invalidated], notifications: [...notifications.values()] };
     }, options);
     if (result.invalidated.length)
         publicInvalidation.emit("changed");
+    for (const event of result.notifications)
+        committedChanges.emit("committed", event);
     return result.value;
 }
